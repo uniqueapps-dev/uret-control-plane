@@ -1,0 +1,15 @@
+{
+  "name": "uret-control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "description": "URET control-plane tooling",
+  "scripts": {
+    "setup:notion": "node create-uret-databases.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@notionhq/client": "^5.26.0"
+  }
+}
