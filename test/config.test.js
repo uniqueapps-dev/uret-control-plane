@@ -5,8 +5,8 @@ const assert = require("node:assert");
 const util = require("util");
 const { spawnSync } = require("child_process");
 const path = require("path");
-const { loadConfig, describeStatus } = require("../bot/config");
-const { fakeToken } = require("./helpers");
+const { loadConfig, describeStatus, describeNotionStatus, notionConfigLine, secretValues } = require("../bot/config");
+const { fakeToken, fakeNotionToken, fakePageId, dashedId } = require("./helpers");
 
 const ENTRY = path.join(__dirname, "..", "bot", "index.js");
 
@@ -68,4 +68,113 @@ test("the bot refuses to start with missing or malformed configuration and print
     assert.ok(!output.includes(token), "token printed");
     assert.ok(!output.includes("not-a-number"), "user ID value printed");
   }
+});
+
+// --- Optional Notion configuration -----------------------------------------
+
+function telegramEnv() {
+  return { TELEGRAM_BOT_TOKEN: fakeToken(), TELEGRAM_ALLOWED_USER_ID: "700000001" };
+}
+
+test("without Notion variables, Notion is off and the bot can still start", () => {
+  const { ok, notion, config } = loadConfig(telegramEnv());
+  assert.strictEqual(ok, true);
+  assert.strictEqual(notion.state, "off");
+  assert.deepStrictEqual(notion.status, { NOTION_TOKEN: "missing", URET_ROOT_PAGE_ID: "missing" });
+  assert.strictEqual(config.notionConfigured, false);
+  assert.strictEqual(config.notionToken, undefined);
+  assert.strictEqual(config.rootPageId, undefined);
+  assert.strictEqual(notionConfigLine(config), "Notion configuration: NOT OK");
+});
+
+test("a partial Notion configuration is NOT OK but the bot can still start", () => {
+  const cases = [
+    [{ NOTION_TOKEN: fakeNotionToken() }, { NOTION_TOKEN: "valid", URET_ROOT_PAGE_ID: "missing" }],
+    [{ URET_ROOT_PAGE_ID: fakePageId() }, { NOTION_TOKEN: "missing", URET_ROOT_PAGE_ID: "valid" }],
+  ];
+  for (const [extra, expected] of cases) {
+    const { ok, notion, config } = loadConfig({ ...telegramEnv(), ...extra });
+    assert.strictEqual(ok, true);
+    assert.strictEqual(notion.state, "not_ok");
+    assert.deepStrictEqual(notion.status, expected);
+    assert.strictEqual(config.notionConfigured, false);
+  }
+});
+
+test("malformed Notion tokens are rejected", () => {
+  const bad = [
+    "abc",
+    "ntn_short",
+    `token_${"a".repeat(30)}`,
+    `ntn_${"a".repeat(10)} ${"b".repeat(10)}`,
+    fakeToken(),
+  ];
+  for (const token of bad) {
+    const { notion, config } = loadConfig({ ...telegramEnv(), NOTION_TOKEN: token, URET_ROOT_PAGE_ID: fakePageId() });
+    assert.strictEqual(notion.status.NOTION_TOKEN, "malformed", "accepted a malformed token");
+    assert.strictEqual(notion.state, "not_ok");
+    assert.strictEqual(config.notionConfigured, false);
+  }
+  const legacy = `secret_${"A1".repeat(12)}`;
+  assert.strictEqual(loadConfig({ ...telegramEnv(), NOTION_TOKEN: legacy }).notion.status.NOTION_TOKEN, "valid");
+});
+
+test("malformed root page IDs are rejected", () => {
+  const id = fakePageId();
+  const bad = [id.slice(1), `${id}0`, id.replace(/./, "g"), `${id.slice(0, 8)}-${id.slice(8)}`, "not-a-page-id"];
+  for (const rootId of bad) {
+    const { notion } = loadConfig({ ...telegramEnv(), NOTION_TOKEN: fakeNotionToken(), URET_ROOT_PAGE_ID: rootId });
+    assert.strictEqual(notion.status.URET_ROOT_PAGE_ID, "malformed", `accepted ${rootId}`);
+    assert.strictEqual(notion.state, "not_ok");
+  }
+});
+
+test("a valid Notion configuration is OK, in plain or dashed ID form", () => {
+  const id = fakePageId();
+  for (const rootId of [id, dashedId(id), dashedId(id).toUpperCase()]) {
+    const token = fakeNotionToken();
+    const { ok, notion, config } = loadConfig({ ...telegramEnv(), NOTION_TOKEN: token, URET_ROOT_PAGE_ID: rootId });
+    assert.strictEqual(ok, true);
+    assert.strictEqual(notion.state, "ok");
+    assert.strictEqual(config.notionConfigured, true);
+    assert.ok(config.notionToken === token, "token not available to the adapter");
+    assert.ok(config.rootPageId === id, "root page ID not normalised");
+    assert.strictEqual(notionConfigLine(config), "Notion configuration: OK");
+  }
+});
+
+test("Notion token and root page ID are hidden from printed or saved config", () => {
+  const token = fakeNotionToken();
+  const id = fakePageId();
+  const { config, notion } = loadConfig({ ...telegramEnv(), NOTION_TOKEN: token, URET_ROOT_PAGE_ID: dashedId(id) });
+  for (const view of [JSON.stringify(config), util.inspect(config), String(config), describeNotionStatus(notion).join("\n")]) {
+    assert.ok(!view.includes(token), "Notion token visible");
+    assert.ok(!view.includes(id) && !view.includes(dashedId(id)), "root page ID visible");
+  }
+  assert.deepStrictEqual(describeNotionStatus(notion), ["NOTION_TOKEN: valid", "URET_ROOT_PAGE_ID: valid"]);
+});
+
+test("the Telegram configuration status is unchanged by Notion variables", () => {
+  const { status } = loadConfig({ ...telegramEnv(), NOTION_TOKEN: "bad", URET_ROOT_PAGE_ID: "bad" });
+  assert.deepStrictEqual(status, { TELEGRAM_BOT_TOKEN: "valid", TELEGRAM_ALLOWED_USER_ID: "valid" });
+});
+
+test("invalid Telegram config still prevents start even with valid Notion config", () => {
+  const { ok, notion, config } = loadConfig({ NOTION_TOKEN: fakeNotionToken(), URET_ROOT_PAGE_ID: fakePageId() });
+  assert.strictEqual(ok, false);
+  assert.strictEqual(config, null);
+  assert.strictEqual(notion.state, "ok");
+});
+
+test("secretValues lists every secret for redaction, including both root ID forms", () => {
+  const botToken = fakeToken();
+  const token = fakeNotionToken();
+  const id = fakePageId();
+  const { config } = loadConfig({ TELEGRAM_BOT_TOKEN: botToken, TELEGRAM_ALLOWED_USER_ID: "1", NOTION_TOKEN: token, URET_ROOT_PAGE_ID: id });
+  const secrets = secretValues(config);
+  for (const expected of [botToken, token, id, dashedId(id)]) {
+    assert.ok(secrets.includes(expected), "secret missing from redaction list");
+  }
+  assert.deepStrictEqual(secretValues(loadConfig(telegramEnv()).config).length, 1);
+  assert.deepStrictEqual(secretValues(null), []);
 });

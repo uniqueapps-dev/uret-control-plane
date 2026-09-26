@@ -17,9 +17,10 @@ const sources = fs
 
 const ALLOWED_LINES = new Set(['"Notion: Not configured in Phase 1",', '"Hermes: Not used / isolated legacy system",']);
 
-function offendingLines(pattern) {
+function offendingLines(pattern, exemptFiles = []) {
   const hits = [];
   for (const { file, text } of sources) {
+    if (exemptFiles.includes(file)) continue;
     text.split("\n").forEach((line, i) => {
       if (pattern.test(line) && !ALLOWED_LINES.has(line.trim())) hits.push(`${file}:${i + 1}`);
     });
@@ -31,8 +32,14 @@ test("bot sources exist", () => {
   assert.ok(sources.length >= 7);
 });
 
+// Phase 2A step 1: config.js names the optional Notion variables and logger.js
+// redacts Notion token/ID shapes. Neither loads a Notion client (see the
+// require guard below). This guard is replaced by the full Phase 2A
+// allow-list/deny-list in step 5.
+const NOTION_WORD_EXEMPT = ["config.js", "logger.js"];
+
 test("the only Notion and Hermes references are the two /health status lines", () => {
-  assert.deepStrictEqual(offendingLines(/notion/i), []);
+  assert.deepStrictEqual(offendingLines(/notion/i, NOTION_WORD_EXEMPT), []);
   assert.deepStrictEqual(offendingLines(/hermes/i), []);
   const all = sources.map((s) => s.text).join("\n");
   assert.ok(all.includes("Notion: Not configured in Phase 1"));

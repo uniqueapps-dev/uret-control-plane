@@ -14,6 +14,19 @@ function fakeToken() {
   return `${crypto.randomInt(100000, 999999999)}:${crypto.randomBytes(27).toString("base64url")}`;
 }
 
+// Fake Notion values, generated per run: an "ntn_" token and a 32-hex page ID.
+function fakeNotionToken() {
+  return `ntn_${crypto.randomBytes(24).toString("hex")}`;
+}
+
+function fakePageId() {
+  return crypto.randomBytes(16).toString("hex");
+}
+
+function dashedId(id) {
+  return `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}`;
+}
+
 function tempDir(prefix = "uret-bot-test-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
@@ -84,4 +97,4 @@ async function waitFor(predicate, timeoutMs = 2000) {
   }
 }
 
-module.exports = { AUTHORIZED_ID, OTHER_ID, fakeToken, tempDir, message, captureStream, fakeTelegramFetch, waitFor };
+module.exports = { AUTHORIZED_ID, OTHER_ID, fakeToken, fakeNotionToken, fakePageId, dashedId, tempDir, message, captureStream, fakeTelegramFetch, waitFor };

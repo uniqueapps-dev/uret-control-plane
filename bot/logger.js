@@ -17,13 +17,17 @@ const MAX_FIELD_LENGTH = 64;
 
 // Anything shaped like a Telegram bot token, with or without the "bot" URL prefix.
 const TOKEN_PATTERN = /(bot)?\d{5,}:[A-Za-z0-9_-]{20,}/g;
+// Anything shaped like a Notion integration token ("ntn_…" or "secret_…").
+const NOTION_TOKEN_PATTERN = /(?:ntn|secret)_[A-Za-z0-9]{16,}/g;
+// Any 32-hex-character Notion ID (page, database, data source), plain or dashed.
+const NOTION_ID_PATTERN = /[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}/gi;
 
 function redact(text, secrets = []) {
   let out = String(text);
   for (const secret of secrets) {
     if (secret) out = out.split(secret).join("[REDACTED]");
   }
-  return out.replace(TOKEN_PATTERN, "[REDACTED]");
+  return out.replace(TOKEN_PATTERN, "[REDACTED]").replace(NOTION_TOKEN_PATTERN, "[REDACTED]").replace(NOTION_ID_PATTERN, "[REDACTED]");
 }
 
 function createLogger({ dir, fileName = "bot.log", secrets = [], stdout = process.stdout } = {}) {

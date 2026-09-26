@@ -5,7 +5,7 @@ const assert = require("node:assert");
 const fs = require("fs");
 const path = require("path");
 const { createLogger, redact, ALLOWED_FIELDS } = require("../bot/logger");
-const { fakeToken, tempDir, captureStream } = require("./helpers");
+const { fakeToken, fakeNotionToken, fakePageId, dashedId, tempDir, captureStream } = require("./helpers");
 
 function readLines(file) {
   return fs.readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line));
@@ -62,4 +62,33 @@ test("falls back to stdout when the log directory is not writable", () => {
   assert.match(out.text(), /log_file_unwritable/);
   assert.match(out.text(), /"event":"startup"/);
   assert.ok(!out.text().includes(base), "path revealed");
+});
+
+test("redacts Notion tokens and Notion IDs even when not passed as known secrets", () => {
+  const ntn = fakeNotionToken();
+  const legacy = `secret_${"Ab1".repeat(10)}`;
+  const id = fakePageId();
+  for (const value of [ntn, legacy, id, dashedId(id), dashedId(id).toUpperCase()]) {
+    const out = redact(`before ${value} after`);
+    assert.ok(!out.includes(value), "Notion value not redacted");
+    assert.match(out, /^before \[REDACTED\] after$/);
+  }
+});
+
+test("known Notion secrets never reach the log file or stdout", () => {
+  const token = fakeNotionToken();
+  const id = fakePageId();
+  const dir = tempDir();
+  const out = captureStream();
+  const logger = createLogger({ dir, secrets: [token, id, dashedId(id)], stdout: out });
+  logger.log({ event: `ds ${dashedId(id)}`, result: `root ${id}`, error_class: token });
+  const raw = fs.readFileSync(path.join(dir, "bot.log"), "utf8") + out.text();
+  assert.ok(!raw.includes(token), "Notion token logged");
+  assert.ok(!raw.includes(id) && !raw.includes(dashedId(id)), "Notion ID logged");
+});
+
+test("ordinary log values are not altered by Notion redaction", () => {
+  for (const value of ["api_error_409", "notion_timeout", "status", "stale_updates", "dropped", "SIGTERM"]) {
+    assert.strictEqual(redact(value), value);
+  }
 });
