@@ -5,7 +5,7 @@
  * URET Control Bot MVP v0.1 — Phase 1 entry point.
  *
  * Telegram long polling -> authorization -> Phase 1 command router.
- * No Notion access and no URET record creation in this phase.
+ * Phase 1 reads and writes no URET records.
  *
  * Usage (Termux):
  *   set -a; . ./.env; set +a; npm run start:bot
