@@ -1,3 +1,10 @@
 node_modules/
 uret-id-counters.json.lock
 uret-id-counters.json.*.tmp
+.env
+.env.*
+!.env.example
+logs/
+runtime/
+state/
+*.log

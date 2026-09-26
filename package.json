@@ -4,7 +4,9 @@
   "private": true,
   "description": "URET control-plane tooling",
   "scripts": {
-    "setup:notion": "node create-uret-databases.js"
+    "setup:notion": "node create-uret-databases.js",
+    "start:bot": "node bot/index.js",
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": ">=18"
