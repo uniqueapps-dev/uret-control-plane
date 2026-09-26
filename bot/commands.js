@@ -39,7 +39,7 @@ function parseCommand(text) {
   return match ? match[1].toLowerCase() : null;
 }
 
-function createRouter({ sessions, configStatus, logDir, runtimeDir }) {
+function createRouter({ sessions, configStatus, logDir }) {
   const handlers = {
     start: () => START_TEXT,
     help: () => HELP_TEXT,
@@ -48,7 +48,7 @@ function createRouter({ sessions, configStatus, logDir, runtimeDir }) {
       return CANCEL_TEXT;
     },
     health: () =>
-      buildHealthReport({ configStatus, logDir, runtimeDir, sessions, commandCount: Object.keys(handlers).length }),
+      buildHealthReport({ configStatus, logDir, sessions, commandCount: Object.keys(handlers).length }),
   };
 
   // Returns { command, reply }. `command` is a known command name or "unknown",

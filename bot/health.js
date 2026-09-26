@@ -2,13 +2,16 @@
 
 /**
  * /health — local checks only. Makes no network calls and reports no values,
- * paths or error details.
+ * paths or error details. A reply shows only that the command reached the bot;
+ * it makes no claim about process supervision or lasting connectivity.
  */
 
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { VARIABLES } = require("./config");
+
+const EXPECTED_COMMAND_COUNT = 4;
 
 // Creates the directory if needed, then writes and removes a probe file.
 function checkWritable(dir) {
@@ -17,39 +20,36 @@ function checkWritable(dir) {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(probe, "ok");
     fs.unlinkSync(probe);
-    return "writable";
+    return true;
   } catch {
     try {
       fs.unlinkSync(probe);
     } catch {
       // probe was never created
     }
-    return "not writable";
+    return false;
   }
 }
 
-function buildHealthReport({ configStatus, logDir, runtimeDir, sessions, commandCount }) {
-  const configLine = VARIABLES.map((name) => `${name} ${configStatus[name] === "valid" ? "present" : configStatus[name]}`).join(", ");
-
-  let sessionLine;
+function sessionStoreOk(sessions) {
   try {
-    sessionLine = `available (in memory, ${sessions.size()} active)`;
+    return Number.isInteger(sessions.size());
   } catch {
-    sessionLine = "unavailable";
+    return false;
   }
+}
 
+function buildHealthReport({ configStatus, logDir, sessions, commandCount }) {
+  const configOk = VARIABLES.every((name) => configStatus[name] === "valid");
   return [
-    "URET Control Bot health (local checks only)",
+    "URET CONTROL BOT HEALTH",
     "",
-    `Configuration: ${configLine}`,
-    `Log directory: ${checkWritable(logDir)}`,
-    `Runtime directory: ${checkWritable(runtimeDir)}`,
-    `Session store: ${sessionLine}`,
-    `Command handlers: ${commandCount} available`,
+    `Command handler: ${commandCount === EXPECTED_COMMAND_COUNT ? "OK" : "NOT OK"}`,
+    `Configuration: ${configOk ? "OK" : "NOT OK"}`,
+    `Session store: ${sessionStoreOk(sessions) ? "OK" : "NOT OK"}`,
+    `Logs: ${checkWritable(logDir) ? "OK" : "NOT WRITABLE"}`,
     "Notion: Not configured in Phase 1",
     "Hermes: Not used / isolated legacy system",
-    "",
-    "This reply shows only that the bot process is running and polling. It is not watched by any external supervisor.",
   ].join("\n");
 }
 

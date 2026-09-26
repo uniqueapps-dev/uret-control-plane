@@ -21,7 +21,6 @@ const { createRouter } = require("./commands");
 
 const ROOT = path.join(__dirname, "..");
 const LOG_DIR = path.join(ROOT, "logs");
-const RUNTIME_DIR = path.join(ROOT, "runtime");
 const POLL_TIMEOUT_S = 30;
 const RETRY_DELAY_MS = 5000;
 // Telegram errors that retrying cannot fix: 401/404 mean the token is wrong,
@@ -45,8 +44,8 @@ function abortableSleep(ms, signal) {
 const errorClassOf = (err) => (err && err.errorClass ? err.errorClass : "internal_error");
 const errorLabelOf = (err) => (err && err.errorCode ? `${errorClassOf(err)}_${err.errorCode}` : errorClassOf(err));
 
-function createBot({ config, configStatus, telegram, logger, sessions, logDir = LOG_DIR, runtimeDir = RUNTIME_DIR, retryDelayMs = RETRY_DELAY_MS, pollTimeoutS = POLL_TIMEOUT_S }) {
-  const router = createRouter({ sessions, configStatus, logDir, runtimeDir });
+function createBot({ config, configStatus, telegram, logger, sessions, logDir = LOG_DIR, retryDelayMs = RETRY_DELAY_MS, pollTimeoutS = POLL_TIMEOUT_S }) {
+  const router = createRouter({ sessions, configStatus, logDir });
   const controller = new AbortController();
   let running = false;
   let loop = null;

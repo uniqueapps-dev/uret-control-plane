@@ -19,7 +19,7 @@ write any URET records** and has no connection to any other system.
 | `/start` | Introduction and the list of commands |
 | `/help` | The list of commands |
 | `/cancel` | Clears the current in-memory interaction. Nothing is created or changed. |
-| `/health` | Local checks only: configuration present, log and runtime folders writable, session store and command handlers available |
+| `/health` | Local checks only: command handlers, configuration, in-memory session store and log folder |
 
 Any other message gets a pointer to `/help`.
 
@@ -77,10 +77,11 @@ variable and its status (`missing` or `malformed`), never the value.
   terminal). Only these fields are recorded: timestamp, event, command,
   result, error class, duration, and whether the sender was authorized.
   Message text, user IDs, URLs and tokens are never logged.
-- **`/health`** confirms only that the bot process is running and polling. It is
-  not watched by any external supervisor; if Termux kills the process, nothing
-  restarts it.
-- `logs/`, `runtime/` and `state/` are local and ignored by Git.
+- **`/health`** runs local checks only. A reply shows that your command reached
+  the bot; it does not mean anything is watching or restarting the bot. If
+  Termux stops the process, nothing restarts it.
+- **No saved state:** Phase 1 keeps conversation state in memory only. The only
+  thing written to disk is `logs/`, which is local and ignored by Git.
 
 ### Tests
 

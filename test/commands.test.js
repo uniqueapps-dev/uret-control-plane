@@ -17,7 +17,6 @@ function setup(overrides = {}) {
     sessions,
     configStatus: VALID_STATUS,
     logDir: path.join(base, "logs"),
-    runtimeDir: path.join(base, "runtime"),
     ...overrides,
   });
   return { base, sessions, router };
@@ -62,36 +61,48 @@ test("/cancel clears the in-memory session and confirms nothing was written", ()
   assert.deepStrictEqual(sessions.get(2), { step: "other chat" }, "other sessions must be untouched");
 });
 
-test("/health reports local checks, Notion not configured and Hermes isolated", () => {
+test("/health gives the concise local-only report", () => {
   const { router, base } = setup();
   const { command, reply } = router.route({ text: "/health", chatId: 1 });
   assert.strictEqual(command, "health");
-  const lines = reply.split("\n");
-  assert.ok(lines.includes("Configuration: TELEGRAM_BOT_TOKEN present, TELEGRAM_ALLOWED_USER_ID present"));
-  assert.ok(lines.includes("Log directory: writable"));
-  assert.ok(lines.includes("Runtime directory: writable"));
-  assert.ok(lines.includes("Session store: available (in memory, 0 active)"));
-  assert.ok(lines.includes("Command handlers: 4 available"));
-  assert.ok(lines.includes("Notion: Not configured in Phase 1"));
-  assert.ok(lines.includes("Hermes: Not used / isolated legacy system"));
-  assert.match(reply, /not watched by any external supervisor/);
+  assert.strictEqual(
+    reply,
+    [
+      "URET CONTROL BOT HEALTH",
+      "",
+      "Command handler: OK",
+      "Configuration: OK",
+      "Session store: OK",
+      "Logs: OK",
+      "Notion: Not configured in Phase 1",
+      "Hermes: Not used / isolated legacy system",
+    ].join("\n")
+  );
+  assert.doesNotMatch(reply, /connected|active|running|supervis|Telegram/i, "claims connectivity or supervision");
   assert.ok(!reply.includes(base), "filesystem path revealed");
-  assert.ok(!reply.includes(require("os").tmpdir()), "temp path revealed");
-  // Probe files are cleaned up.
+  // Only the log folder is touched, and its probe file is cleaned up.
+  assert.deepStrictEqual(fs.readdirSync(base), ["logs"]);
   assert.deepStrictEqual(fs.readdirSync(path.join(base, "logs")), []);
-  assert.deepStrictEqual(fs.readdirSync(path.join(base, "runtime")), []);
 });
 
-test("/health reports unwritable directories without revealing paths or errors", () => {
+test("/health reports failures without revealing paths or errors", () => {
   const base = tempDir();
   const blocker = path.join(base, "a-file");
   fs.writeFileSync(blocker, "x");
-  const { router } = setup({ logDir: path.join(blocker, "logs"), runtimeDir: path.join(blocker, "runtime") });
+  const brokenSessions = { clear() {}, size() { throw new Error(`store failure at ${base}`); } };
+  const { router } = setup({
+    logDir: path.join(blocker, "logs"),
+    sessions: brokenSessions,
+    configStatus: { TELEGRAM_BOT_TOKEN: "valid", TELEGRAM_ALLOWED_USER_ID: "malformed" },
+  });
   const { reply } = router.route({ text: "/health", chatId: 1 });
-  assert.ok(reply.includes("Log directory: not writable"));
-  assert.ok(reply.includes("Runtime directory: not writable"));
+  const lines = reply.split("\n");
+  assert.ok(lines.includes("Logs: NOT WRITABLE"));
+  assert.ok(lines.includes("Session store: NOT OK"));
+  assert.ok(lines.includes("Configuration: NOT OK"));
+  assert.ok(lines.includes("Command handler: OK"));
   assert.ok(!reply.includes(base), "filesystem path revealed");
-  assert.doesNotMatch(reply, /ENOTDIR|EACCES|Error/);
+  assert.doesNotMatch(reply, /ENOTDIR|EACCES|Error|failure|malformed|TELEGRAM_/);
 });
 
 test("unknown commands and plain text only point to /help", () => {

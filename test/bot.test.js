@@ -28,7 +28,6 @@ function setup(t, { getUpdatesResponses, sendMessageResponse } = {}) {
     logger,
     sessions,
     logDir: path.join(base, "logs"),
-    runtimeDir: path.join(base, "runtime"),
     retryDelayMs: 5,
   });
   // Always stop the bot, even when an assertion fails, so a failing test
