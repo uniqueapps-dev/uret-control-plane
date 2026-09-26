@@ -6,5 +6,4 @@ uret-id-counters.json.*.tmp
 !.env.example
 logs/
 runtime/
-state/
 *.log
