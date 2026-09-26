@@ -68,6 +68,9 @@ variable and its status (`missing` or `malformed`), never the value.
 
 ### Behaviour worth knowing
 
+- **One copy only:** if another process is already receiving updates for the
+  same bot token, Telegram reports a conflict and the bot stops with exit code 1
+  instead of retrying. Stop the other copy, then start the bot again.
 - **Restart:** messages sent while the bot was stopped are discarded, not run.
   All in-memory state is lost on restart; nothing is restored or written.
 - **Logs:** one JSON line per event in `logs/bot.log` (also printed to the

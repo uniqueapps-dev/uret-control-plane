@@ -45,6 +45,11 @@ function setup(t, { getUpdatesResponses, sendMessageResponse } = {}) {
 
 const ok = (result) => ({ ok: true, result });
 
+// Waits for the polling loop to end on its own, but never longer than `ms`:
+// if a fatal error were wrongly retried, the test fails instead of hanging
+// (t.after() then stops the bot).
+const settleWithin = (promise, ms = 1000) => Promise.race([promise, new Promise((resolve) => setTimeout(resolve, ms))]);
+
 test("drops queued updates at startup, then routes only authorized private messages", async (t) => {
   const stale = message({ updateId: 50, text: "/start" });
   const ctx = setup(t, {
@@ -159,11 +164,39 @@ test("Telegram API errors carry only the numeric error code", async () => {
 
 test("a rejected token (401) stops polling instead of retrying forever", async (t) => {
   const ctx = setup(t, { getUpdatesResponses: [{ ok: false, error_code: 401, description: "Unauthorized" }] });
-  await ctx.bot.start();
+  await settleWithin(ctx.bot.start());
   assert.strictEqual(ctx.bot.isRunning(), false);
   assert.strictEqual(ctx.bot.fatalError().errorCode, 401);
   assert.ok(ctx.logRecords().some((r) => r.result === "fatal" && r.error_class === "api_error_401"));
   assert.strictEqual(ctx.sent().length, 0);
+});
+
+// Conflict body that echoes the request URL, to prove nothing from it escapes.
+function conflict(token) {
+  return { ok: false, error_code: 409, description: `Conflict: terminated by other getUpdates request (bot${token})` };
+}
+
+test("a 409 conflict during polling is fatal: polling stops with no retry", async (t) => {
+  const token = fakeToken();
+  const ctx = setup(t, { getUpdatesResponses: [ok([]), conflict(token)] });
+  await settleWithin(ctx.bot.start());
+  assert.strictEqual(ctx.bot.isRunning(), false);
+  assert.strictEqual(ctx.bot.fatalError().errorCode, 409);
+  assert.strictEqual(ctx.fake.calls.filter((c) => c.method === "getUpdates").length, 2, "retried after 409");
+  const records = ctx.logRecords();
+  assert.ok(records.some((r) => r.event === "polling" && r.result === "fatal" && r.error_class === "api_error_409"));
+  assert.ok(!records.some((r) => r.event === "poll" && r.result === "error"), "409 treated as retryable");
+  const everything = ctx.logText() + ctx.out.text();
+  assert.ok(!everything.includes(token) && !everything.includes(ctx.token), "token leaked");
+  assert.ok(!everything.includes("Conflict"), "Telegram error description logged");
+});
+
+test("a 409 conflict while dropping stale updates at startup is also fatal", async (t) => {
+  const ctx = setup(t, { getUpdatesResponses: [conflict(fakeToken())] });
+  await settleWithin(ctx.bot.start());
+  assert.strictEqual(ctx.bot.isRunning(), false);
+  assert.strictEqual(ctx.bot.fatalError().errorCode, 409);
+  assert.strictEqual(ctx.fake.calls.length, 1, "retried after 409");
 });
 
 test("stop() ends an in-flight long poll promptly and handles nothing afterwards", async (t) => {
@@ -182,8 +215,9 @@ test("stop() ends an in-flight long poll promptly and handles nothing afterwards
 
 // Runs the real entry point as a separate process, with fetch stubbed by a
 // preload module (no network), from a temporary copy of bot/ so its logs/
-// and runtime/ directories are created outside the repository.
-function runEntryPoint(signalName) {
+// directory is created outside the repository. With `conflict`, the first long
+// poll answers 409; otherwise the process is sent `signalName` once polling.
+function runEntryPoint({ signalName, conflict = false }) {
   const base = tempDir();
   fs.cpSync(path.join(__dirname, "..", "bot"), path.join(base, "bot"), { recursive: true });
   const token = fakeToken();
@@ -194,6 +228,9 @@ function runEntryPoint(signalName) {
        const method = url.slice(url.lastIndexOf("/") + 1);
        if (method === "getUpdates" && JSON.parse(init.body).offset === -1) {
          return { status: 200, json: async () => ({ ok: true, result: [] }) };
+       }
+       if (${conflict} && method === "getUpdates") {
+         return { status: 409, json: async () => ({ ok: false, error_code: 409, description: "Conflict " + url }) };
        }
        return new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted " + url)), { once: true }));
      };\n`
@@ -211,7 +248,7 @@ function runEntryPoint(signalName) {
       reject(new Error("entry point did not stop"));
     }, 10000);
     const poll = setInterval(() => {
-      if (output.includes('"result":"started"')) {
+      if (signalName && output.includes('"result":"started"')) {
         clearInterval(poll);
         child.kill(signalName);
       }
@@ -227,10 +264,20 @@ function runEntryPoint(signalName) {
 
 for (const signalName of ["SIGINT", "SIGTERM"]) {
   test(`the entry point shuts down cleanly on ${signalName}`, async () => {
-    const { code, output, token, log } = await runEntryPoint(signalName);
+    const { code, output, token, log } = await runEntryPoint({ signalName });
     assert.strictEqual(code, 0, "non-zero exit code");
     assert.match(log, new RegExp(`"event":"shutdown","result":"${signalName}"`));
     assert.match(log, /"event":"polling","result":"stopped"/);
     assert.ok(!output.includes(token) && !log.includes(token), "token leaked");
   });
 }
+
+test("the entry point exits non-zero on a 409 conflict without leaking the token", async () => {
+  const { code, output, token, log } = await runEntryPoint({ conflict: true });
+  assert.strictEqual(code, 1, "expected exit code 1");
+  assert.match(output, /another process is already receiving updates for this bot token/);
+  assert.match(log, /"event":"polling","result":"fatal","error_class":"api_error_409"/);
+  assert.doesNotMatch(log, /"event":"poll","result":"error"/, "409 was retried");
+  assert.ok(!output.includes(token) && !log.includes(token), "token leaked");
+  assert.ok(!output.includes("api.telegram.org") && !output.includes("Conflict"), "URL or Telegram description printed");
+});

@@ -24,8 +24,10 @@ const LOG_DIR = path.join(ROOT, "logs");
 const RUNTIME_DIR = path.join(ROOT, "runtime");
 const POLL_TIMEOUT_S = 30;
 const RETRY_DELAY_MS = 5000;
-// Telegram answers these when the token is wrong; retrying cannot help.
-const FATAL_ERROR_CODES = new Set([401, 404]);
+// Telegram errors that retrying cannot fix: 401/404 mean the token is wrong,
+// 409 means another process is already receiving updates for this token.
+const FATAL_ERROR_CODES = new Set([401, 404, 409]);
+const CONFLICT_ERROR_CODE = 409;
 
 function abortableSleep(ms, signal) {
   return new Promise((resolve) => {
@@ -170,9 +172,14 @@ async function main() {
 
   logger.log({ event: "startup", result: "ok" });
   await bot.start();
-  if (bot.fatalError()) {
+  const fatal = bot.fatalError();
+  if (fatal) {
     logger.close();
-    process.stderr.write("URET Control Bot stopped: Telegram rejected the bot token. Check TELEGRAM_BOT_TOKEN.\n");
+    process.stderr.write(
+      fatal.errorCode === CONFLICT_ERROR_CODE
+        ? "URET Control Bot stopped: another process is already receiving updates for this bot token. Stop the other instance, then restart.\n"
+        : "URET Control Bot stopped: Telegram rejected the bot token. Check TELEGRAM_BOT_TOKEN.\n"
+    );
     process.exitCode = 1;
   }
 }
