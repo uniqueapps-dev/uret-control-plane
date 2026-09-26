@@ -1,9 +1,11 @@
 "use strict";
 
 /**
- * /health — local checks only. Makes no network calls and reports no values,
- * paths or error details. A reply shows only that the command reached the bot;
- * it makes no claim about process supervision or lasting connectivity.
+ * /health. The Phase 1 lines are local checks only and report no values,
+ * paths or error details. The Notion lines come from the read-only adapter's
+ * health() and say OK only when that read succeeded during this /health.
+ * A reply shows only that the command reached the bot; it makes no claim
+ * about process supervision or lasting connectivity.
  */
 
 const fs = require("fs");
@@ -11,7 +13,8 @@ const path = require("path");
 const crypto = require("crypto");
 const { VARIABLES } = require("./config");
 
-const EXPECTED_COMMAND_COUNT = 4;
+const EXPECTED_COMMAND_COUNT = 6;
+const STATE_TEXT = { ok: "OK", not_ok: "NOT OK", not_checked: "NOT CHECKED" };
 
 // Creates the directory if needed, then writes and removes a probe file.
 function checkWritable(dir) {
@@ -39,18 +42,40 @@ function sessionStoreOk(sessions) {
   }
 }
 
-function buildHealthReport({ configStatus, logDir, sessions, commandCount }) {
+// Notion part of /health. Without an adapter nothing is read.
+async function notionHealth(notion, signal) {
+  if (!notion) {
+    return { configured: false, reachable: "not_checked", sourceFound: "not_checked", schemaValid: "not_checked", label: "notion_not_configured" };
+  }
+  try {
+    const h = await notion.health({ signal });
+    return { configured: true, ...h };
+  } catch (err) {
+    if (err && err.label === "notion_aborted") throw err;
+    return { configured: true, reachable: "not_ok", sourceFound: "not_checked", schemaValid: "not_checked", label: "notion_error" };
+  }
+}
+
+const stateText = (state) => STATE_TEXT[state] || "NOT CHECKED";
+
+// Returns { text, label }, where label is the adapter's notion_* label (or null).
+async function buildHealthReport({ configStatus, logDir, sessions, commandCount, notion = null, signal }) {
   const configOk = VARIABLES.every((name) => configStatus[name] === "valid");
-  return [
+  const n = await notionHealth(notion, signal);
+  const text = [
     "URET CONTROL BOT HEALTH",
     "",
     `Command handler: ${commandCount === EXPECTED_COMMAND_COUNT ? "OK" : "NOT OK"}`,
     `Configuration: ${configOk ? "OK" : "NOT OK"}`,
     `Session store: ${sessionStoreOk(sessions) ? "OK" : "NOT OK"}`,
     `Logs: ${checkWritable(logDir) ? "OK" : "NOT WRITABLE"}`,
-    "Notion: Not configured in Phase 1",
+    `Notion configuration: ${n.configured ? "OK" : "NOT OK"}`,
+    `Notion reachable: ${stateText(n.reachable)}`,
+    `Opportunities source: ${stateText(n.sourceFound)}`,
+    `Opportunities schema: ${stateText(n.schemaValid)}`,
     "Hermes: Not used / isolated legacy system",
   ].join("\n");
+  return { text, label: n.label || null };
 }
 
-module.exports = { buildHealthReport, checkWritable };
+module.exports = { buildHealthReport, checkWritable, EXPECTED_COMMAND_COUNT };

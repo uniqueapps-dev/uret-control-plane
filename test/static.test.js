@@ -15,7 +15,7 @@ const sources = fs
   .filter((f) => f.endsWith(".js"))
   .map((f) => ({ file: f, text: fs.readFileSync(path.join(BOT_DIR, f), "utf8") }));
 
-const ALLOWED_LINES = new Set(['"Notion: Not configured in Phase 1",', '"Hermes: Not used / isolated legacy system",']);
+const ALLOWED_LINES = new Set(['"Hermes: Not used / isolated legacy system",']);
 
 function offendingLines(pattern, exemptFiles = []) {
   const hits = [];
@@ -32,18 +32,19 @@ test("bot sources exist", () => {
   assert.ok(sources.length >= 7);
 });
 
-// Phase 2A steps 1-3: config.js names the optional Notion variables, logger.js
+// Phase 2A steps 1-4: config.js names the optional Notion variables, logger.js
 // redacts Notion token/ID shapes, opportunities.js holds the fixed reply
-// texts and notion.js is the read-only adapter. Only notion.js may load the
+// texts, notion.js is the read-only adapter, and commands.js, health.js and
+// index.js wire /status, /show and /health to it. Only notion.js may load the
 // Notion SDK (see the require guard below). This guard is replaced by the full Phase 2A
 // allow-list/deny-list in step 5.
-const NOTION_WORD_EXEMPT = ["config.js", "logger.js", "opportunities.js", "notion.js"];
+const NOTION_WORD_EXEMPT = ["config.js", "logger.js", "opportunities.js", "notion.js", "commands.js", "health.js", "index.js"];
 
-test("the only Notion and Hermes references are the two /health status lines", () => {
+test("Notion is referenced only in the Phase 2A files, Hermes only in the /health line", () => {
   assert.deepStrictEqual(offendingLines(/notion/i, NOTION_WORD_EXEMPT), []);
   assert.deepStrictEqual(offendingLines(/hermes/i), []);
   const all = sources.map((s) => s.text).join("\n");
-  assert.ok(all.includes("Notion: Not configured in Phase 1"));
+  assert.ok(all.includes("`Notion configuration: ${"));
   assert.ok(all.includes("Hermes: Not used / isolated legacy system"));
 });
 

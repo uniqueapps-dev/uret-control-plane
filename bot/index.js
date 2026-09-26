@@ -2,17 +2,18 @@
 "use strict";
 
 /**
- * URET Control Bot MVP v0.1 — Phase 1 entry point.
+ * URET Control Bot MVP v0.1 — entry point.
  *
- * Telegram long polling -> authorization -> Phase 1 command router.
- * Phase 1 reads and writes no URET records.
+ * Telegram long polling -> authorization -> command router. When Notion is
+ * configured, /status, /show and /health read URET Opportunities through the
+ * read-only adapter; nothing ever writes URET records.
  *
  * Usage (Termux):
  *   set -a; . ./.env; set +a; npm run start:bot
  */
 
 const path = require("path");
-const { loadConfig, describeStatus } = require("./config");
+const { loadConfig, describeStatus, describeNotionStatus, secretValues } = require("./config");
 const { createLogger } = require("./logger");
 const { createSessionStore } = require("./session");
 const { createTelegramClient } = require("./telegram");
@@ -43,9 +44,10 @@ function abortableSleep(ms, signal) {
 
 const errorClassOf = (err) => (err && err.errorClass ? err.errorClass : "internal_error");
 const errorLabelOf = (err) => (err && err.errorCode ? `${errorClassOf(err)}_${err.errorCode}` : errorClassOf(err));
+const INTERNAL_ERROR_TEXT = "Internal error.";
 
-function createBot({ config, configStatus, telegram, logger, sessions, logDir = LOG_DIR, retryDelayMs = RETRY_DELAY_MS, pollTimeoutS = POLL_TIMEOUT_S }) {
-  const router = createRouter({ sessions, configStatus, logDir });
+function createBot({ config, configStatus, telegram, logger, sessions, notion = null, router: routerOverride, logDir = LOG_DIR, retryDelayMs = RETRY_DELAY_MS, pollTimeoutS = POLL_TIMEOUT_S }) {
+  const router = routerOverride || createRouter({ sessions, configStatus, logDir, notion });
   const controller = new AbortController();
   let running = false;
   let loop = null;
@@ -63,12 +65,35 @@ function createBot({ config, configStatus, telegram, logger, sessions, logDir = 
     if (!running) return;
 
     const started = Date.now();
-    let command = "unknown";
+    const signal = controller.signal;
+    let command = typeof router.commandOf === "function" ? router.commandOf(message.text) : "unknown";
+    let reply;
+    let errorClass;
     try {
-      const routed = router.route({ text: message.text, chatId: message.chat.id });
+      const routed = await router.route({ text: message.text, chatId: message.chat.id, signal });
       command = routed.command;
-      await telegram.sendMessage(message.chat.id, routed.reply, { signal: controller.signal });
-      logger.log({ event: "command", command, result: "ok", authorized: true, duration_ms: Date.now() - started });
+      reply = routed.reply;
+      errorClass = routed.label;
+      if (typeof reply !== "string" || reply.trim() === "") {
+        reply = INTERNAL_ERROR_TEXT;
+        errorClass = "internal_error";
+      }
+    } catch (err) {
+      if (err && err.label === "notion_aborted") {
+        // Shutting down: the Notion read was abandoned and no reply is sent.
+        logger.log({ event: "command", command, result: "aborted", error_class: "notion_aborted", authorized: true, duration_ms: Date.now() - started });
+        return;
+      }
+      reply = INTERNAL_ERROR_TEXT;
+      errorClass = "internal_error";
+    }
+    if (signal.aborted) {
+      logger.log({ event: "command", command, result: "aborted", authorized: true, duration_ms: Date.now() - started });
+      return;
+    }
+    try {
+      await telegram.sendMessage(message.chat.id, reply, { signal });
+      logger.log({ event: "command", command, result: errorClass ? "error" : "ok", error_class: errorClass, authorized: true, duration_ms: Date.now() - started });
     } catch (err) {
       logger.log({ event: "command", command, result: "error", error_class: errorLabelOf(err), authorized: true, duration_ms: Date.now() - started });
     }
@@ -143,17 +168,30 @@ function createBot({ config, configStatus, telegram, logger, sessions, logDir = 
 }
 
 async function main() {
-  const { ok, status, config } = loadConfig(process.env);
+  const { ok, status, notion: notionStatus, config } = loadConfig(process.env);
   if (!ok) {
     process.stderr.write(["URET Control Bot: configuration invalid.", ...describeStatus(status).map((l) => `  ${l}`)].join("\n") + "\n");
     process.exitCode = 1;
     return;
   }
 
-  const logger = createLogger({ dir: LOG_DIR, secrets: [config.botToken] });
+  const logger = createLogger({ dir: LOG_DIR, secrets: secretValues(config) });
   const telegram = createTelegramClient({ token: config.botToken });
   const sessions = createSessionStore();
-  const bot = createBot({ config, configStatus: status, telegram, logger, sessions });
+
+  // Notion is optional. The SDK is loaded only when Notion is configured, and
+  // nothing is read from Notion until the first command that needs it.
+  let notion = null;
+  if (config.notionConfigured) {
+    const { createNotionClient, createNotionReader } = require("./notion");
+    notion = createNotionReader({ client: createNotionClient(config), rootPageId: config.rootPageId });
+  } else if (notionStatus.state === "not_ok") {
+    // Local console only: names and states, never values.
+    process.stderr.write(["Notion configuration: NOT OK", ...describeNotionStatus(notionStatus).map((l) => `  ${l}`)].join("\n") + "\n");
+  }
+  logger.log({ event: "notion_config", result: notionStatus.state });
+
+  const bot = createBot({ config, configStatus: status, telegram, logger, sessions, notion });
 
   let stopping = false;
   async function shutdown(signalName) {
