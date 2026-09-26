@@ -32,11 +32,12 @@ test("bot sources exist", () => {
   assert.ok(sources.length >= 7);
 });
 
-// Phase 2A step 1: config.js names the optional Notion variables and logger.js
-// redacts Notion token/ID shapes. Neither loads a Notion client (see the
+// Phase 2A steps 1-2: config.js names the optional Notion variables, logger.js
+// redacts Notion token/ID shapes and opportunities.js holds the fixed reply
+// texts. None of them loads a Notion client (see the
 // require guard below). This guard is replaced by the full Phase 2A
 // allow-list/deny-list in step 5.
-const NOTION_WORD_EXEMPT = ["config.js", "logger.js"];
+const NOTION_WORD_EXEMPT = ["config.js", "logger.js", "opportunities.js"];
 
 test("the only Notion and Hermes references are the two /health status lines", () => {
   assert.deepStrictEqual(offendingLines(/notion/i, NOTION_WORD_EXEMPT), []);
