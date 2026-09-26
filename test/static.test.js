@@ -32,12 +32,12 @@ test("bot sources exist", () => {
   assert.ok(sources.length >= 7);
 });
 
-// Phase 2A steps 1-2: config.js names the optional Notion variables, logger.js
-// redacts Notion token/ID shapes and opportunities.js holds the fixed reply
-// texts. None of them loads a Notion client (see the
-// require guard below). This guard is replaced by the full Phase 2A
+// Phase 2A steps 1-3: config.js names the optional Notion variables, logger.js
+// redacts Notion token/ID shapes, opportunities.js holds the fixed reply
+// texts and notion.js is the read-only adapter. Only notion.js may load the
+// Notion SDK (see the require guard below). This guard is replaced by the full Phase 2A
 // allow-list/deny-list in step 5.
-const NOTION_WORD_EXEMPT = ["config.js", "logger.js", "opportunities.js"];
+const NOTION_WORD_EXEMPT = ["config.js", "logger.js", "opportunities.js", "notion.js"];
 
 test("the only Notion and Hermes references are the two /health status lines", () => {
   assert.deepStrictEqual(offendingLines(/notion/i, NOTION_WORD_EXEMPT), []);
@@ -56,6 +56,10 @@ test("bot modules require only Node built-ins or local files", () => {
   const builtins = new Set(builtinModules.flatMap((m) => [m, `node:${m}`]));
   for (const { file, text } of sources) {
     for (const [, name] of text.matchAll(/require\(\s*["']([^"']+)["']\s*\)/g)) {
+      if (name === "@notionhq/client") {
+        assert.strictEqual(file, "notion.js", `${file} requires the Notion SDK; only notion.js may`);
+        continue;
+      }
       assert.ok(name.startsWith("./") || builtins.has(name), `${file} requires ${name}`);
     }
     assert.doesNotMatch(text, /create-uret-databases|uret-id-counters/, `${file} references the setup script or counters`);
