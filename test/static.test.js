@@ -1,49 +1,88 @@
 "use strict";
 
-// Static guards on the bot sources (Phase 2A final rules, with Phase 3-5 interim
-// changes marked below):
-// - only bot/notion.js loads the Notion SDK, and it may call only four reads;
-// - bot/notionWrite.js (step 5) also loads it, and may call only pages.create
-//   (exactly once) and dataSources.retrieve / databases.retrieve;
-// - no page API, generic request, search or mutation call anywhere in bot/
-//   (standard Map/Set methods on locally created collections are allowed);
-// - no other URET data source, no ID allocation, no setup-script use;
-// - no AI provider, webhook, server, GitHub or crawler code;
-// - only Node built-ins or local files, only the Telegram host, no new dependencies;
-// - no token- or ID-shaped literals.
+// Static guards on the bot sources (final rules, Phase 3-5):
+//
+// Notion boundary
+// - only bot/notion.js and bot/notionWrite.js load the Notion SDK, and only
+//   bot/index.js loads those adapters and the ID counter;
+// - bot/notion.js calls exactly four reads: blocks.children.list,
+//   databases.retrieve, dataSources.retrieve, dataSources.query;
+// - bot/notionWrite.js calls exactly pages.create (written once) and
+//   dataSources.retrieve;
+// - no other file touches a Notion client;
+// - nowhere in bot/: any other page API (pages.update / delete / move / ...),
+//   client.request, search, .create( / .append( / .move( / updateMarkdown, or
+//   .update( / .delete( on anything but a Map/Set created in the same file.
+//
+// Scope
+// - URET data source titles only in the two adapters (Evidence and Releases
+//   only in the read adapter), plus the three locked "Stored in ..." lines;
+// - the counter file is named only in bot/idCounter.js and test/helpers.js;
+//   the setup script is never used; tests always use temporary counter files
+//   and install the real-counter guard;
+// - Phase 1 transport, authorization and session modules stay free of Notion;
+//   Hermes appears only in the /health line;
+// - no AI provider, webhook, server, GitHub or crawler code (the Worker option
+//   name "Claude Code" is data: one exact literal in bot/captureFlows.js);
+// - only Node built-ins or local files, only the Telegram host, no new
+//   dependencies, no token- or ID-shaped literals.
 
 const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("fs");
 const path = require("path");
 const { builtinModules } = require("module");
+const { REAL_COUNTER_FILE } = require("./helpers");
 
 const BOT_DIR = path.join(__dirname, "..", "bot");
+const TEST_DIR = __dirname;
 
 // Removes /* */ and // comments so code rules ignore prose. "://" in URLs is kept.
 function stripComments(text) {
   return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\])\/\/.*$/gm, "$1");
 }
 
-const sources = fs
-  .readdirSync(BOT_DIR)
-  .filter((f) => f.endsWith(".js"))
-  .map((f) => {
-    const text = fs.readFileSync(path.join(BOT_DIR, f), "utf8");
-    return { file: f, text, code: stripComments(text) };
-  });
+function load(dir) {
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith(".js"))
+    .map((f) => {
+      const text = fs.readFileSync(path.join(dir, f), "utf8");
+      return { file: f, text, code: stripComments(text) };
+    });
+}
 
+const sources = load(BOT_DIR);
+const testSources = load(TEST_DIR);
+const source = (file) => sources.find((s) => s.file === file);
 const lineOf = (text, index) => text.slice(0, index).split("\n").length;
 
 const SDK = "@notionhq/client";
-const ADAPTER_FILE = "notion.js";
-const PERMITTED_CLIENT_CALLS = ["blocks.children.list", "databases.retrieve", "dataSources.retrieve", "dataSources.query"];
-// Phase 3-5 step 5 (interim, finalised in step 10): the write adapter.
-const WRITER_FILE = "notionWrite.js";
-const WRITER_CLIENT_CALLS = ["pages.create", "dataSources.retrieve", "databases.retrieve"];
-const WRITER_CREATE_CALL = /\bclient\s*\.\s*pages\s*\.\s*create\s*\(/g;
+const READ_ADAPTER = "notion.js";
+const WRITE_ADAPTER = "notionWrite.js";
+const ADAPTERS = [READ_ADAPTER, WRITE_ADAPTER];
+const READ_CALLS = ["blocks.children.list", "databases.retrieve", "dataSources.retrieve", "dataSources.query"];
+const WRITE_CALLS = ["pages.create", "dataSources.retrieve"];
+const PAGES_CREATE = /\bclient\s*\.\s*pages\s*\.\s*create\s*\(/g;
+// Modules only index.js may load (it wires them together).
+const WIRED_BY_INDEX = ["./notion", "./notionWrite", "./idCounter"];
 // Phase 1 transport, authorization and session modules stay free of Notion.
 const NOTION_FREE_FILES = ["auth.js", "session.js", "telegram.js"];
+
+const TITLE = (names) => new RegExp(`URET\\s*[‐-―-]\\s*(?:${names})\\b`);
+const ANY_TITLE = TITLE("Opportunities|Specs|Work Packages|Evidence|Releases");
+const NOT_CREATABLE_TITLE = TITLE("Evidence|Releases");
+// The locked confirmation lines are the only titles outside the adapters.
+const CONFIRMATION_FILE = "captureFlows.js";
+const CONFIRMATION_LINES = ['"Stored in URET – Opportunities.",', '"Stored in URET – Specs.",', '"Stored in URET – Work Packages.",'];
+
+const COUNTER_STEM = path.basename(REAL_COUNTER_FILE, ".json");
+const COUNTER_FILES = { bot: "idCounter.js", test: "helpers.js" };
+
+const WORKER_OPTION = '"Claude Code"';
+const WORKER_OPTION_FILE = "captureFlows.js";
+
+// --- Checkers ----------------------------------------------------------------------
 
 /**
  * Forbidden call patterns in code (comments removed). Returns violations.
@@ -72,23 +111,36 @@ function forbiddenCalls(code) {
 }
 
 /**
- * Notion client use. In the adapter every `client.<chain>` must be one of the
- * four permitted reads and must be called; bracket access and aliasing are
- * forbidden. Everywhere else `client.` / `client[` must not appear at all.
+ * Notion client use. With an allow-list (`permitted`), every `client.<chain>`
+ * must be one of those calls and must be called; bracket access and aliasing
+ * are forbidden. Without one (`null`), `client.` / `client[` must not appear.
  */
-function clientViolations(code, isAdapter, permitted = PERMITTED_CLIENT_CALLS) {
+function clientViolations(code, permitted) {
   const violations = [];
   if (/\bclient\s*\[/.test(code)) violations.push("bracket access on client");
   if (/(?:=|\(|,|\.\.\.)\s*client\s*(?:[;,)}\]]|$)/m.test(code)) violations.push("client aliased or passed on");
   for (const m of code.matchAll(/\bclient((?:\s*\.\s*[A-Za-z_$][\w$]*)+)/g)) {
     const chain = m[1].replace(/\s/g, "").slice(1);
-    if (!isAdapter) {
-      violations.push(`client.${chain} outside the adapter`);
+    if (!permitted) {
+      violations.push(`client.${chain} outside the adapters`);
       continue;
     }
     const called = /^\s*\(/.test(code.slice(m.index + m[0].length));
     if (!permitted.includes(chain) || !called) violations.push(`client.${chain} at line ${lineOf(code, m.index)}`);
   }
+  return violations;
+}
+
+const usedCalls = (code) =>
+  [...new Set([...code.matchAll(/\bclient((?:\s*\.\s*[A-Za-z_$][\w$]*)+)\s*\(/g)].map((m) => m[1].replace(/\s/g, "").slice(1)))].sort();
+
+// The write adapter: its allow-list, pages.create written exactly once, and
+// every other forbidden pattern still forbidden.
+function writerViolations(code) {
+  const violations = clientViolations(code, WRITE_CALLS);
+  const creates = [...code.matchAll(PAGES_CREATE)].length;
+  if (creates !== 1) violations.push(`pages.create written ${creates} times`);
+  violations.push(...forbiddenCalls(code.replace(PAGES_CREATE, "client.PAGES_CREATE(")));
   return violations;
 }
 
@@ -98,6 +150,8 @@ test("guard self-test: forbidden calls are detected, built-in collections are al
   const bad = [
     "client.pages.create({})",
     "notion.pages.retrieve({})",
+    "client.pages.update({})",
+    "client.pages.delete({})",
     "client.request({ path: 'x' })",
     "client.search({ query: 'x' })",
     "search({})",
@@ -115,12 +169,13 @@ test("guard self-test: forbidden calls are detected, built-in collections are al
     "const sessions = new Map(); sessions.delete(key);",
     "let seen = new Set(); seen.delete(1);",
     "client.dataSources.query({})",
+    "capture.createSession(1); store.deleteSession(id);",
     "const pageCount = 1; const hits = [];",
   ];
   for (const snippet of good) assert.deepStrictEqual(forbiddenCalls(snippet), [], `false positive: ${snippet}`);
 });
 
-test("guard self-test: client use outside the allow-list is detected", () => {
+test("guard self-test: client use outside an allow-list is detected", () => {
   const bad = [
     "client.pages.retrieve({})",
     "client.search({})",
@@ -133,10 +188,26 @@ test("guard self-test: client use outside the allow-list is detected", () => {
     "const x = client.dataSources.query;",
     "client.users.list({})",
   ];
-  for (const snippet of bad) assert.ok(clientViolations(snippet, true).length > 0, `not detected: ${snippet}`);
-  for (const call of PERMITTED_CLIENT_CALLS) assert.deepStrictEqual(clientViolations(`client.${call}({})`, true), [], call);
-  assert.deepStrictEqual(clientViolations("function f({ client, rootPageId }) {}", true), []);
-  assert.ok(clientViolations("client.dataSources.query({})", false).length > 0, "client use outside the adapter not detected");
+  for (const snippet of bad) assert.ok(clientViolations(snippet, READ_CALLS).length > 0, `not detected: ${snippet}`);
+  for (const call of READ_CALLS) assert.deepStrictEqual(clientViolations(`client.${call}({})`, READ_CALLS), [], call);
+  assert.deepStrictEqual(clientViolations("function f({ client, rootPageId }) {}", READ_CALLS), []);
+  assert.ok(clientViolations("client.dataSources.query({})", null).length > 0, "client use outside the adapters not detected");
+});
+
+test("guard self-test: the write adapter rule", () => {
+  const ok = "client.dataSources.retrieve({}); client.pages.create({});";
+  assert.deepStrictEqual(writerViolations(ok), []);
+  const bad = [
+    "client.dataSources.retrieve({});",
+    `${ok} client.pages.create({});`,
+    `${ok} client.databases.retrieve({});`,
+    `${ok} client.dataSources.query({});`,
+    `${ok} client.pages.update({});`,
+    `${ok} notion.pages.retrieve({});`,
+    `${ok} client.search({});`,
+    `${ok} cache.delete(1);`,
+  ];
+  for (const snippet of bad) assert.ok(writerViolations(snippet).length > 0, `not detected: ${snippet}`);
 });
 
 test("guard self-test: comments are ignored for code rules but URLs survive", () => {
@@ -145,83 +216,100 @@ test("guard self-test: comments are ignored for code rules but URLs survive", ()
   assert.strictEqual(stripComments('const u = "https://example.invalid/x";'), 'const u = "https://example.invalid/x";');
 });
 
-// --- Notion SDK boundary ------------------------------------------------------------
+// --- Notion boundary ------------------------------------------------------------------
 
 test("bot sources exist", () => {
-  assert.ok(sources.length >= 10);
-  assert.ok(sources.some((s) => s.file === ADAPTER_FILE));
+  assert.ok(sources.length >= 14);
+  for (const file of [...ADAPTERS, "idCounter.js", "captureFlows.js", "captureSession.js", "index.js"]) assert.ok(source(file), file);
 });
 
-test("only bot/notion.js loads the Notion SDK; only index.js loads the adapter", () => {
+test("only the two adapters load the Notion SDK; only index.js loads the adapters and the ID counter", () => {
   const builtins = new Set(builtinModules.flatMap((m) => [m, `node:${m}`]));
   for (const { file, code } of sources) {
     assert.doesNotMatch(code, /\bimport\s*\(/, `${file} uses a dynamic import`);
     for (const [, name] of code.matchAll(/require\(\s*["']([^"']+)["']\s*\)/g)) {
       if (name === SDK) {
-        assert.ok([ADAPTER_FILE, WRITER_FILE].includes(file), `${file} loads the Notion SDK; only ${ADAPTER_FILE} and ${WRITER_FILE} may`);
-      } else if (name === "./notion" || name === "./notionWrite") {
-        assert.strictEqual(file, "index.js", `${file} loads the adapter; only index.js wires it`);
+        assert.ok(ADAPTERS.includes(file), `${file} loads the Notion SDK; only ${ADAPTERS.join(" and ")} may`);
+      } else if (WIRED_BY_INDEX.includes(name)) {
+        assert.strictEqual(file, "index.js", `${file} loads ${name}; only index.js wires it`);
       } else {
         assert.ok(name.startsWith("./") || builtins.has(name), `${file} requires ${name}`);
       }
     }
   }
-  const adapter = sources.find((s) => s.file === ADAPTER_FILE);
-  assert.match(adapter.code, /require\(\s*["']@notionhq\/client["']\s*\)/, "adapter does not load the SDK");
+  for (const file of ADAPTERS) assert.match(source(file).code, /require\(\s*["']@notionhq\/client["']\s*\)/, `${file} does not load the SDK`);
 });
 
-test("the adapter calls only the four permitted Notion reads", () => {
-  const adapter = sources.find((s) => s.file === ADAPTER_FILE);
-  assert.deepStrictEqual(clientViolations(adapter.code, true), []);
-  const used = new Set([...adapter.code.matchAll(/\bclient((?:\s*\.\s*[A-Za-z_$][\w$]*)+)\s*\(/g)].map((m) => m[1].replace(/\s/g, "").slice(1)));
-  assert.deepStrictEqual([...used].sort(), [...PERMITTED_CLIENT_CALLS].sort());
+test("the read adapter calls exactly the four permitted reads", () => {
+  const { code } = source(READ_ADAPTER);
+  assert.deepStrictEqual(clientViolations(code, READ_CALLS), []);
+  assert.deepStrictEqual(usedCalls(code), [...READ_CALLS].sort());
+  assert.deepStrictEqual(forbiddenCalls(code), []);
 });
 
-test("the write adapter calls only pages.create (once), dataSources.retrieve and databases.retrieve", () => {
-  const writer = sources.find((s) => s.file === WRITER_FILE);
-  assert.ok(writer, "notionWrite.js missing");
-  assert.deepStrictEqual(clientViolations(writer.code, true, WRITER_CLIENT_CALLS), []);
-  assert.strictEqual([...writer.code.matchAll(WRITER_CREATE_CALL)].length, 1, "pages.create must appear exactly once");
-  assert.deepStrictEqual(forbiddenCalls(writer.code.replace(WRITER_CREATE_CALL, "client.PAGES_CREATE(")), []);
+test("the write adapter calls exactly pages.create (written once) and dataSources.retrieve", () => {
+  const { code } = source(WRITE_ADAPTER);
+  assert.deepStrictEqual(writerViolations(code), []);
+  assert.deepStrictEqual(usedCalls(code), [...WRITE_CALLS].sort());
 });
 
-test("no other bot file touches a Notion client", () => {
+test("no other bot file touches a Notion client or calls a page API, request, search or mutation", () => {
   for (const { file, code } of sources) {
-    if (file === ADAPTER_FILE || file === WRITER_FILE) continue;
-    assert.deepStrictEqual(clientViolations(code, false), [], file);
-  }
-});
-
-test("no page API, generic request, search or mutation call anywhere in bot/ (the writer's one create aside)", () => {
-  for (const { file, code } of sources) {
-    if (file === WRITER_FILE) continue; // checked above, with only its single pages.create exempt
+    if (ADAPTERS.includes(file)) continue;
+    assert.deepStrictEqual(clientViolations(code, null), [], file);
     assert.deepStrictEqual(forbiddenCalls(code), [], file);
   }
 });
 
 // --- Scope ------------------------------------------------------------------------------
 
-// Phase 3-5 steps 1, 5 and 7 (interim, finalised in step 10): the read adapter
-// knows all five URET data sources; Specs and Work Packages may be named
-// anywhere (they are created and shown); Evidence and Releases only there.
-test("the Evidence and Releases titles appear only in the read adapter", () => {
-  const notCreatable = /URET\s*[‐-―-]\s*(?:Evidence|Releases)\b/;
+test("URET data source titles appear only in the adapters and the locked confirmation lines", () => {
   for (const { file, text } of sources) {
-    if (file === ADAPTER_FILE) continue;
-    assert.doesNotMatch(text, notCreatable, file);
+    if (file === READ_ADAPTER) continue;
+    if (file === WRITE_ADAPTER) {
+      assert.doesNotMatch(text, NOT_CREATABLE_TITLE, file);
+      continue;
+    }
+    text.split("\n").forEach((line, i) => {
+      if (!ANY_TITLE.test(line)) return;
+      const allowed = file === CONFIRMATION_FILE && CONFIRMATION_LINES.includes(line.trim());
+      assert.ok(allowed, `${file}:${i + 1} names a URET data source`);
+    });
   }
+  const flows = source(CONFIRMATION_FILE).text;
+  for (const line of CONFIRMATION_LINES) assert.strictEqual(flows.split(line).length - 1, 1, line);
 });
 
-// Phase 3-5 steps 3 and 6 (interim, finalised in step 10): only bot/idCounter.js
-// may refer to the counter file; /new_opportunity is now a command; the
-// setup script is never used.
-const ID_COUNTER_FILE = "idCounter.js";
-test("no setup-script use; the counter file only in idCounter.js", () => {
-  for (const { file, text } of sources) {
-    assert.doesNotMatch(text, /nextUretId|create-uret-databases/, file);
-    if (file !== ID_COUNTER_FILE) assert.doesNotMatch(text, /uret-id-counters/, file);
+test("the counter file is named only in bot/idCounter.js and test/helpers.js; the setup script is never used", () => {
+  assert.strictEqual(COUNTER_STEM, ["uret", "id", "counters"].join("-"));
+  for (const [dir, files, allowed] of [["bot", sources, COUNTER_FILES.bot], ["test", testSources, COUNTER_FILES.test]]) {
+    for (const { file, text } of files) {
+      if (file === allowed) continue;
+      assert.ok(!text.includes(COUNTER_STEM), `${dir}/${file} names the counter file`);
+    }
+    assert.ok(files.find((s) => s.file === allowed).text.includes(`${COUNTER_STEM}.json`), `${dir}/${allowed} no longer names it`);
   }
-  assert.ok(sources.some((s) => s.file === ID_COUNTER_FILE), "idCounter.js missing");
+  for (const { file, text } of sources) assert.doesNotMatch(text, /nextUretId|create-uret-databases/, file);
+});
+
+test("every test file that can reach the ID counter installs the real-counter guard", () => {
+  const reaches = /require\(\s*["']\.\.\/bot\/(?:idCounter|index)["']\s*\)/;
+  const guarded = [];
+  for (const { file, code } of testSources.filter((s) => s.file.endsWith(".test.js"))) {
+    if (!reaches.test(code)) continue;
+    assert.match(code, /^forbidRealCounterFile\(\);$/m, `${file} loads the ID counter without forbidRealCounterFile()`);
+    guarded.push(file);
+  }
+  assert.ok(guarded.length >= 6, `only ${guarded.length} guarded files`);
+});
+
+test("tests always pass a temporary file to reserveNextId", () => {
+  for (const { file, code } of testSources) {
+    if (file === "static.test.js") continue;
+    for (const m of code.matchAll(/reserveNextId\(([^\n]*)/g)) {
+      assert.match(m[1], /\bfile\b/, `${file}: reserveNextId without a file option`);
+    }
+  }
 });
 
 test("Phase 1 transport, authorization and session modules do not reference Notion", () => {
@@ -237,13 +325,8 @@ test("Hermes appears only in the /health line", () => {
       if (/hermes/i.test(line)) assert.strictEqual(line.trim(), allowed, `${file}:${i + 1}`);
     });
   }
-  assert.ok(sources.find((s) => s.file === "health.js").text.includes(allowed));
+  assert.ok(source("health.js").text.includes(allowed));
 });
-
-// Phase 3-5 step 8 (approved exemption): the Worker option name "Claude Code",
-// as one exact string literal in bot/captureFlows.js, is data, not AI code.
-const WORKER_OPTION = '"Claude Code"';
-const WORKER_OPTION_FILE = "captureFlows.js";
 
 test("no AI provider, webhook, server, GitHub or crawler code", () => {
   const forbidden = /openai|anthropic|claude|gemini|perplexity|llm|setWebhook|webhook|createServer|listen\(|github|puppeteer|playwright|crawl/i;
@@ -255,8 +338,7 @@ test("no AI provider, webhook, server, GitHub or crawler code", () => {
 
 test("the Worker option exemption covers exactly one literal in one file", () => {
   for (const { file, text } of sources) {
-    const count = text.split(WORKER_OPTION).length - 1;
-    assert.strictEqual(count, file === WORKER_OPTION_FILE ? 1 : 0, file);
+    assert.strictEqual(text.split(WORKER_OPTION).length - 1, file === WORKER_OPTION_FILE ? 1 : 0, file);
   }
 });
 
@@ -280,45 +362,20 @@ test("no source or test file contains a token- or ID-shaped literal", () => {
     [/(?:ntn|secret)_[A-Za-z0-9]{16,}/, "Notion token"],
     [/\b[0-9a-f]{32}\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i, "Notion ID"],
   ];
-  for (const dir of [BOT_DIR, __dirname]) {
-    for (const f of fs.readdirSync(dir).filter((n) => n.endsWith(".js"))) {
-      const text = fs.readFileSync(path.join(dir, f), "utf8");
-      for (const [shape, kind] of shapes) assert.doesNotMatch(text, shape, `${f} contains a ${kind}-shaped literal`);
-    }
+  for (const { file, text } of [...sources, ...testSources]) {
+    for (const [shape, kind] of shapes) assert.doesNotMatch(text, shape, `${file} contains a ${kind}-shaped literal`);
   }
 });
 
-// Phase 3-5 step 9: tests never touch the repository's real counter file.
-test("every test file that can reach the ID counter installs the real-counter guard", () => {
-  const reaches = /require\(\s*["']\.\.\/bot\/(?:idCounter|index)["']\s*\)/;
-  const files = fs.readdirSync(__dirname).filter((n) => n.endsWith(".test.js"));
-  const guarded = [];
-  for (const f of files) {
-    const code = stripComments(fs.readFileSync(path.join(__dirname, f), "utf8"));
-    if (!reaches.test(code)) continue;
-    assert.match(code, /^forbidRealCounterFile\(\);$/m, `${f} loads the ID counter without forbidRealCounterFile()`);
-    guarded.push(f);
-  }
-  assert.ok(guarded.length >= 5, `only ${guarded.length} guarded files`);
-});
+// --- Wiring -------------------------------------------------------------------------------
 
-test("tests always pass a temporary file to reserveNextId", () => {
-  for (const f of fs.readdirSync(__dirname).filter((n) => n.endsWith(".js"))) {
-    const code = stripComments(fs.readFileSync(path.join(__dirname, f), "utf8"));
-    for (const m of code.matchAll(/reserveNextId\(([^\n]*)/g)) {
-      if (f === "static.test.js") continue;
-      assert.match(m[1], /\bfile\b/, `${f}: reserveNextId without a file option`);
-    }
-  }
-});
-
-// Phase 3-5 step 9: main() wiring, which runs only with a live configuration.
+// main() runs only with a live configuration, so its wiring is checked here.
 test("index.js wires the write adapter and ID reservation as designed", () => {
-  const index = sources.find((s) => s.file === "index.js").code;
+  const index = source("index.js").code;
   const main = index.slice(index.indexOf("async function main("));
   // Loaded only when Notion is configured, inside that branch.
   const branch = main.slice(main.indexOf("if (config.notionConfigured) {"), main.indexOf("} else if (notionStatus.state"));
-  for (const mod of ["./notion", "./notionWrite", "./idCounter"]) {
+  for (const mod of WIRED_BY_INDEX) {
     assert.ok(branch.includes(`require("${mod}")`), `${mod} not loaded in the configured branch`);
     assert.strictEqual(index.split(`require("${mod}")`).length - 1, 1, `${mod} loaded more than once`);
   }

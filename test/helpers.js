@@ -129,6 +129,17 @@ function counterSnapshot() {
   };
 }
 
+/**
+ * A counter file (same name as the real one) in a fresh temporary directory.
+ * `content`: an object (written as JSON), a string (written as is), or null
+ * (no file is created). Tests use only these, never the real file.
+ */
+function tempCounterFile(content = { OPP: 1, SPEC: 0, WP: 0, EVD: 0, REL: 0 }) {
+  const file = path.join(tempDir(), path.basename(REAL_COUNTER_FILE));
+  if (content !== null) fs.writeFileSync(file, typeof content === "string" ? content : JSON.stringify(content, null, 2) + "\n");
+  return file;
+}
+
 function forbidRealCounterFile() {
   if (counterGuard.installed) return counterGuard;
   counterGuard.installed = true;
@@ -170,5 +181,6 @@ module.exports = {
   waitFor,
   REAL_COUNTER_FILE,
   isRealCounterPath,
+  tempCounterFile,
   forbidRealCounterFile,
 };

@@ -5,7 +5,7 @@ const assert = require("node:assert");
 const fs = require("fs");
 const path = require("path");
 const ids = require("../bot/idCounter");
-const { tempDir, forbidRealCounterFile } = require("./helpers");
+const { REAL_COUNTER_FILE, tempCounterFile, forbidRealCounterFile } = require("./helpers");
 
 // This file must never touch the repository's real counter file.
 forbidRealCounterFile();
@@ -13,11 +13,7 @@ forbidRealCounterFile();
 const START = { OPP: 1, SPEC: 0, WP: 0, EVD: 0, REL: 0 };
 
 // A temporary counter file; the repository's real file is never touched.
-function counterFile(content = START) {
-  const file = path.join(tempDir(), "uret-id-counters.json");
-  fs.writeFileSync(file, typeof content === "string" ? content : JSON.stringify(content, null, 2) + "\n");
-  return file;
-}
+const counterFile = (content = START) => tempCounterFile(content);
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 
 // Fake read adapter: IDs in `existing` are found; `trashed` are found and
@@ -48,8 +44,8 @@ async function rejectsWithReason(promise, reason) {
   });
 }
 
-test("the default counter file is the repository's uret-id-counters.json", () => {
-  assert.strictEqual(path.basename(ids.DEFAULT_FILE), "uret-id-counters.json");
+test("the default counter file is the repository's counter file", () => {
+  assert.strictEqual(ids.DEFAULT_FILE, REAL_COUNTER_FILE);
   assert.strictEqual(path.dirname(ids.DEFAULT_FILE), path.join(__dirname, ".."));
 });
 
@@ -174,8 +170,7 @@ test("invalid counter files are refused and left untouched", async () => {
 });
 
 test("a missing file or key counts as zero, as in the setup script", async () => {
-  const dir = tempDir();
-  const missing = path.join(dir, "uret-id-counters.json");
+  const missing = tempCounterFile(null);
   assert.strictEqual(await ids.reserveNextId("opp", fakeReader({ existing: ["OPP-001"] }), { file: missing }), "OPP-002");
   assert.deepStrictEqual(readJson(missing), { OPP: 2, SPEC: 0, WP: 0, EVD: 0, REL: 0 });
   const noRel = counterFile({ OPP: 1, SPEC: 0, WP: 0, EVD: 0 });
@@ -186,7 +181,7 @@ test("writes are atomic: same format, no temp file left, original kept if the wr
   const file = counterFile();
   await ids.reserveNextId("spec", fakeReader(), { file });
   assert.strictEqual(fs.readFileSync(file, "utf8"), JSON.stringify({ ...START, SPEC: 1 }, null, 2) + "\n");
-  assert.deepStrictEqual(fs.readdirSync(path.dirname(file)), ["uret-id-counters.json"]);
+  assert.deepStrictEqual(fs.readdirSync(path.dirname(file)), [path.basename(file)]);
 
   // Block the temp file path so the write cannot happen.
   const blocked = counterFile();

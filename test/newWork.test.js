@@ -10,7 +10,7 @@ const { createCaptureStore, FIELDS } = require("../bot/captureSession");
 const flows = require("../bot/captureFlows");
 const { createNotionWriter } = require("../bot/notionWrite");
 const ids = require("../bot/idCounter");
-const { tempDir, fakePageId, dashedId, AUTHORIZED_ID, forbidRealCounterFile } = require("./helpers");
+const { tempDir, tempCounterFile, fakePageId, dashedId, AUTHORIZED_ID, forbidRealCounterFile } = require("./helpers");
 
 // This file must never touch the repository's real counter file.
 forbidRealCounterFile();
@@ -41,8 +41,7 @@ function harness({ records = {}, linked = { uretIds: [], more: false }, onFind, 
   const clock = { t: 7_000_000 };
   const capture = createCaptureStore({ now: () => clock.t });
   const root = fakePageId();
-  const file = path.join(tempDir(), "uret-id-counters.json");
-  fs.writeFileSync(file, JSON.stringify({ OPP: 2, SPEC: 1, WP: 0, EVD: 0, REL: 0 }, null, 2) + "\n");
+  const file = tempCounterFile({ OPP: 2, SPEC: 1, WP: 0, EVD: 0, REL: 0 });
   const calls = [];
   const dataSource = {
     object: "data_source",

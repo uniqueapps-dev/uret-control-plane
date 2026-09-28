@@ -6,16 +6,17 @@ const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("fs");
 const path = require("path");
-const { REAL_COUNTER_FILE, isRealCounterPath, forbidRealCounterFile, tempDir } = require("./helpers");
+const { REAL_COUNTER_FILE, isRealCounterPath, forbidRealCounterFile, tempCounterFile, tempDir } = require("./helpers");
 
 const guard = forbidRealCounterFile();
 
 test("the guard recognises the real counter file, its lock and temp files, and nothing else", () => {
-  assert.strictEqual(path.basename(REAL_COUNTER_FILE), "uret-id-counters.json");
+  assert.strictEqual(path.dirname(REAL_COUNTER_FILE), path.join(__dirname, ".."));
   for (const p of [REAL_COUNTER_FILE, `${REAL_COUNTER_FILE}.lock`, `${REAL_COUNTER_FILE}.123.tmp`, path.relative(process.cwd(), REAL_COUNTER_FILE) || REAL_COUNTER_FILE]) {
     assert.strictEqual(isRealCounterPath(p), true, p);
   }
-  const temp = path.join(tempDir(), "uret-id-counters.json");
+  const temp = tempCounterFile(null);
+  assert.strictEqual(path.basename(temp), path.basename(REAL_COUNTER_FILE));
   for (const p of [temp, `${temp}.lock`, `${REAL_COUNTER_FILE}x`, path.dirname(REAL_COUNTER_FILE), undefined, 3]) {
     assert.strictEqual(isRealCounterPath(p), false, String(p));
   }
