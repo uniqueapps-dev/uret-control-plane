@@ -1,7 +1,10 @@
 "use strict";
 
-// Static guards on the bot sources (Phase 2A final rules):
+// Static guards on the bot sources (Phase 2A final rules, with Phase 3-5 interim
+// changes marked below):
 // - only bot/notion.js loads the Notion SDK, and it may call only four reads;
+// - bot/notionWrite.js (step 5) also loads it, and may call only pages.create
+//   (exactly once) and dataSources.retrieve / databases.retrieve;
 // - no page API, generic request, search or mutation call anywhere in bot/
 //   (standard Map/Set methods on locally created collections are allowed);
 // - no other URET data source, no ID allocation, no setup-script use;
@@ -35,6 +38,10 @@ const lineOf = (text, index) => text.slice(0, index).split("\n").length;
 const SDK = "@notionhq/client";
 const ADAPTER_FILE = "notion.js";
 const PERMITTED_CLIENT_CALLS = ["blocks.children.list", "databases.retrieve", "dataSources.retrieve", "dataSources.query"];
+// Phase 3-5 step 5 (interim, finalised in step 10): the write adapter.
+const WRITER_FILE = "notionWrite.js";
+const WRITER_CLIENT_CALLS = ["pages.create", "dataSources.retrieve", "databases.retrieve"];
+const WRITER_CREATE_CALL = /\bclient\s*\.\s*pages\s*\.\s*create\s*\(/g;
 // Phase 1 transport, authorization and session modules stay free of Notion.
 const NOTION_FREE_FILES = ["auth.js", "session.js", "telegram.js"];
 
@@ -69,7 +76,7 @@ function forbiddenCalls(code) {
  * four permitted reads and must be called; bracket access and aliasing are
  * forbidden. Everywhere else `client.` / `client[` must not appear at all.
  */
-function clientViolations(code, isAdapter) {
+function clientViolations(code, isAdapter, permitted = PERMITTED_CLIENT_CALLS) {
   const violations = [];
   if (/\bclient\s*\[/.test(code)) violations.push("bracket access on client");
   if (/(?:=|\(|,|\.\.\.)\s*client\s*(?:[;,)}\]]|$)/m.test(code)) violations.push("client aliased or passed on");
@@ -80,7 +87,7 @@ function clientViolations(code, isAdapter) {
       continue;
     }
     const called = /^\s*\(/.test(code.slice(m.index + m[0].length));
-    if (!PERMITTED_CLIENT_CALLS.includes(chain) || !called) violations.push(`client.${chain} at line ${lineOf(code, m.index)}`);
+    if (!permitted.includes(chain) || !called) violations.push(`client.${chain} at line ${lineOf(code, m.index)}`);
   }
   return violations;
 }
@@ -151,8 +158,8 @@ test("only bot/notion.js loads the Notion SDK; only index.js loads the adapter",
     assert.doesNotMatch(code, /\bimport\s*\(/, `${file} uses a dynamic import`);
     for (const [, name] of code.matchAll(/require\(\s*["']([^"']+)["']\s*\)/g)) {
       if (name === SDK) {
-        assert.strictEqual(file, ADAPTER_FILE, `${file} loads the Notion SDK; only ${ADAPTER_FILE} may`);
-      } else if (name === "./notion") {
+        assert.ok([ADAPTER_FILE, WRITER_FILE].includes(file), `${file} loads the Notion SDK; only ${ADAPTER_FILE} and ${WRITER_FILE} may`);
+      } else if (name === "./notion" || name === "./notionWrite") {
         assert.strictEqual(file, "index.js", `${file} loads the adapter; only index.js wires it`);
       } else {
         assert.ok(name.startsWith("./") || builtins.has(name), `${file} requires ${name}`);
@@ -170,28 +177,38 @@ test("the adapter calls only the four permitted Notion reads", () => {
   assert.deepStrictEqual([...used].sort(), [...PERMITTED_CLIENT_CALLS].sort());
 });
 
+test("the write adapter calls only pages.create (once), dataSources.retrieve and databases.retrieve", () => {
+  const writer = sources.find((s) => s.file === WRITER_FILE);
+  assert.ok(writer, "notionWrite.js missing");
+  assert.deepStrictEqual(clientViolations(writer.code, true, WRITER_CLIENT_CALLS), []);
+  assert.strictEqual([...writer.code.matchAll(WRITER_CREATE_CALL)].length, 1, "pages.create must appear exactly once");
+  assert.deepStrictEqual(forbiddenCalls(writer.code.replace(WRITER_CREATE_CALL, "client.PAGES_CREATE(")), []);
+});
+
 test("no other bot file touches a Notion client", () => {
   for (const { file, code } of sources) {
-    if (file === ADAPTER_FILE) continue;
+    if (file === ADAPTER_FILE || file === WRITER_FILE) continue;
     assert.deepStrictEqual(clientViolations(code, false), [], file);
   }
 });
 
-test("no page API, generic request, search or mutation call anywhere in bot/", () => {
+test("no page API, generic request, search or mutation call anywhere in bot/ (the writer's one create aside)", () => {
   for (const { file, code } of sources) {
+    if (file === WRITER_FILE) continue; // checked above, with only its single pages.create exempt
     assert.deepStrictEqual(forbiddenCalls(code), [], file);
   }
 });
 
 // --- Scope ------------------------------------------------------------------------------
 
-// Phase 3-5 step 1 (interim, finalised in step 10): the read adapter now knows
-// all five URET data sources; their titles may appear only in bot/notion.js.
-test("other URET data source titles appear only in the read adapter", () => {
+// Phase 3-5 steps 1 and 5 (interim, finalised in step 10): the read adapter
+// knows all five URET data sources; the write adapter the three it creates in.
+test("other URET data source titles appear only in the Notion adapters", () => {
   const otherSources = /URET\s*[‐-―-]\s*(?:Specs|Work Packages|Evidence|Releases)\b/;
+  const notCreatable = /URET\s*[‐-―-]\s*(?:Evidence|Releases)\b/;
   for (const { file, text } of sources) {
     if (file === ADAPTER_FILE) continue;
-    assert.doesNotMatch(text, otherSources, file);
+    assert.doesNotMatch(text, file === WRITER_FILE ? notCreatable : otherSources, file);
   }
 });
 
