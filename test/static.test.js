@@ -195,10 +195,15 @@ test("other URET data source titles appear only in the read adapter", () => {
   }
 });
 
-test("no opportunity creation, ID allocation or setup-script use", () => {
+// Phase 3-5 step 3 (interim, finalised in step 10): only bot/idCounter.js may
+// refer to the counter file; the other terms stay forbidden everywhere.
+const ID_COUNTER_FILE = "idCounter.js";
+test("no opportunity creation or setup-script use; the counter file only in idCounter.js", () => {
   for (const { file, text } of sources) {
-    assert.doesNotMatch(text, /new_opportunity|nextUretId|uret-id-counters|create-uret-databases/, file);
+    assert.doesNotMatch(text, /new_opportunity|nextUretId|create-uret-databases/, file);
+    if (file !== ID_COUNTER_FILE) assert.doesNotMatch(text, /uret-id-counters/, file);
   }
+  assert.ok(sources.some((s) => s.file === ID_COUNTER_FILE), "idCounter.js missing");
 });
 
 test("Phase 1 transport, authorization and session modules do not reference Notion", () => {
