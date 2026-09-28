@@ -1,9 +1,10 @@
 "use strict";
 
 /**
- * Pure formatting for the read-only Opportunities commands: URET ID
- * normalisation, deterministic truncation, value formatting, and the fixed
- * /status and /show reply texts. No network access, no I/O, no SDK.
+ * Pure formatting for the read-only commands: URET ID normalisation,
+ * deterministic truncation, value formatting, and the fixed /status and
+ * /show reply texts (Opportunities and Specs). No network access, no I/O,
+ * no SDK.
  */
 
 const REQUIRED_STATUSES = ["Idea", "Active", "Parked", "Done"];
@@ -12,8 +13,11 @@ const MIN_WORD_CUT = 200;
 const ELLIPSIS = "…";
 const EMPTY = "—";
 
-const SHOW_USAGE = ["Usage: /show <URET-ID>", "Example: /show OPP-001"].join("\n");
-const INVALID_ID_TEXT = "Invalid URET ID. Example: /show OPP-001";
+const SHOW_USAGE = ["Usage: /show <URET-ID>", "Examples: /show OPP-001, /show SPEC-001"].join("\n");
+const INVALID_ID_TEXT = "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001";
+
+// URET ID prefix -> source type key, for the prefixes /show accepts.
+const SHOW_TYPES = { OPP: "opp", SPEC: "spec" };
 
 const STATUS_INTEGRITY_TEXT = ["Notion: Data integrity problem", "Unexpected Opportunity status values found."].join("\n");
 const STATUS_INCOMPLETE_TEXT = [
@@ -23,14 +27,25 @@ const STATUS_INCOMPLETE_TEXT = [
   "Use Notion directly for the full dataset.",
 ].join("\n");
 
-// "opp-1", "OPP-001" -> "OPP-001"; "OPP-1000" -> "OPP-1000"; anything else -> null.
-function normalizeUretId(input) {
+/**
+ * "opp-1", "OPP-001" -> "OPP-001"; "OPP-1000" -> "OPP-1000"; anything else ->
+ * null. `prefixes` lists the accepted prefixes (default: OPP only).
+ */
+function normalizeUretId(input, prefixes = ["OPP"]) {
   if (typeof input !== "string") return null;
-  const match = /^opp-([0-9]+)$/i.exec(input.trim());
+  const match = /^([a-z]+)-([0-9]+)$/i.exec(input.trim());
   if (!match) return null;
-  const digits = match[1].replace(/^0+/, "");
+  const prefix = match[1].toUpperCase();
+  if (!prefixes.includes(prefix)) return null;
+  const digits = match[2].replace(/^0+/, "");
   if (digits === "") return null; // OPP-0, OPP-000
-  return `OPP-${digits.padStart(3, "0")}`;
+  return `${prefix}-${digits.padStart(3, "0")}`;
+}
+
+// A /show argument -> { type, uretId } for OPP or SPEC, or null.
+function parseShowId(input) {
+  const uretId = normalizeUretId(input, Object.keys(SHOW_TYPES));
+  return uretId ? { type: SHOW_TYPES[uretId.split("-")[0]], uretId } : null;
 }
 
 /**
@@ -131,6 +146,32 @@ function buildShowReply(page) {
   return lines.join("\n");
 }
 
+/**
+ * /show for a Spec. `linked` = { uretIds, more }: the Opportunities whose
+ * "Specs" relation includes this Spec.
+ */
+function buildSpecShowReply(uretId, page, linked) {
+  const properties = (page && page.properties) || {};
+  const ids = (linked && linked.uretIds) || [];
+  const opportunity = ids.length === 0 ? EMPTY : ids.join(", ") + (linked.more ? ", " + ELLIPSIS : "");
+  const lines = [];
+  if (page && (page.in_trash === true || page.archived === true)) lines.push("Archived/trashed record");
+  lines.push(
+    `${uretId} — ${formatProperty(properties.Name)}`,
+    "",
+    `Version: ${formatProperty(properties.Version)}`,
+    `Opportunity: ${formatText(opportunity)}`,
+    `Status: ${formatProperty(properties.Status)}`,
+    `Summary: ${formatProperty(properties.Summary)}`,
+    `Scope in: ${formatProperty(properties["Scope in"])}`,
+    `Scope out: ${formatProperty(properties["Scope out"])}`,
+    `Constraints: ${formatProperty(properties.Constraints)}`,
+    "",
+    linkLine(page)
+  );
+  return lines.join("\n");
+}
+
 const notFoundText = (id) => `Not found: ${id}`;
 const duplicateText = (id) => ["Notion: Data integrity problem", `Duplicate URET ID: ${id}`].join("\n");
 
@@ -157,7 +198,10 @@ module.exports = {
   INVALID_ID_TEXT,
   STATUS_INTEGRITY_TEXT,
   STATUS_INCOMPLETE_TEXT,
+  SHOW_TYPES,
   normalizeUretId,
+  parseShowId,
+  buildSpecShowReply,
   truncate,
   richTextToPlain,
   formatText,

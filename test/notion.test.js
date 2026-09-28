@@ -618,7 +618,7 @@ test("the guard really blocks anything outside the allow-list", () => {
 
 test("the adapter exposes no write operation", () => {
   const reader = fakeWorkspace().reader;
-  assert.deepStrictEqual(Object.keys(reader).sort(), ["countByStatus", "findByUretId", "getDataSourceId", "hasCachedSource", "health"]);
+  assert.deepStrictEqual(Object.keys(reader).sort(), ["countByStatus", "findByUretId", "findLinkedUretIds", "getDataSourceId", "hasCachedSource", "health"]);
 });
 
 // --- Phase 3-5 step 1: all five URET data sources -----------------------------------
@@ -821,4 +821,42 @@ test("getDataSourceId refuses an invalid schema, an unknown type, and a missing 
   for (const type of ["OPP", "x", "__proto__", undefined]) {
     await assert.rejects(none.reader.getDataSourceId(type), TypeError);
   }
+});
+
+// --- Phase 3-5 step 7: linked records for /show SPEC ----------------------------------
+
+const withUretId = (id, extra = {}) => ({ object: "page", in_trash: false, properties: { "URET ID": { type: "rich_text", rich_text: rt(id) } }, ...extra });
+
+test("findLinkedUretIds queries by relation and returns URET IDs only", async () => {
+  const specPage = fakePageId();
+  const ws = fakeWorkspace({
+    query: () => ({
+      object: "list",
+      results: [withUretId("OPP-002"), withUretId("OPP-009", { in_trash: true }), withUretId("  "), { object: "data_source" }],
+      has_more: false,
+    }),
+  });
+  const out = await ws.reader.findLinkedUretIds("opp", "Specs", specPage);
+  assert.deepStrictEqual(out, { uretIds: ["OPP-002"], more: false });
+  const query = ws.calls.find((c) => c.method === "dataSources.query").args;
+  assert.deepStrictEqual(query, { data_source_id: ws.dsId, filter: { property: "Specs", relation: { contains: specPage } }, page_size: 10 });
+});
+
+test("findLinkedUretIds reports more results and refuses bad arguments without calling Notion", async () => {
+  const ws = fakeWorkspace({ query: () => ({ object: "list", results: [withUretId("OPP-001")], has_more: true }) });
+  assert.deepStrictEqual(await ws.reader.findLinkedUretIds("opp", "Specs", fakePageId()), { uretIds: ["OPP-001"], more: true });
+  const fresh = fakeWorkspace();
+  for (const args of [["x", "Specs", "p"], ["opp", "Name", "p"], ["opp", "Nope", "p"], ["opp", "Specs", ""], ["opp", "Specs", undefined], ["__proto__", "Specs", "p"]]) {
+    await assert.rejects(fresh.reader.findLinkedUretIds(...args), TypeError);
+  }
+  assert.strictEqual(fresh.calls.length, 0);
+});
+
+test("findLinkedUretIds errors carry fixed labels", async () => {
+  const ws = fakeWorkspace({
+    query: () => {
+      throw new RequestTimeoutError();
+    },
+  });
+  await rejectsWith(ws.reader.findLinkedUretIds("opp", "Specs", fakePageId()), "notion_timeout");
 });

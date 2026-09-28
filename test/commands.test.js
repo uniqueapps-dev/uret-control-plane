@@ -18,7 +18,7 @@ const { createSessionStore } = require("../bot/session");
 const { tempDir } = require("./helpers");
 
 const VALID_STATUS = { TELEGRAM_BOT_TOKEN: "valid", TELEGRAM_ALLOWED_USER_ID: "valid" };
-const SEVEN = ["/start", "/help", "/cancel", "/status", "/show", "/health", "/new_opportunity"];
+const EIGHT = ["/start", "/help", "/cancel", "/status", "/show", "/health", "/new_opportunity", "/new_spec"];
 
 // Error shaped like the adapter's NotionReadError: a fixed label only.
 const labelled = (label) => Object.assign(new Error(`Notion read failed (${label})`), { label });
@@ -65,24 +65,24 @@ test("parseCommand returns the command name and the text after it", () => {
   assert.strictEqual(parseCommand(undefined), null);
 });
 
-test("/start introduces the bot and lists the seven commands", async () => {
+test("/start introduces the bot and lists the eight commands", async () => {
   const { router } = setup();
   const { command, reply } = await router.route({ text: "/start", chatId: 1 });
   assert.strictEqual(command, "start");
   assert.strictEqual(reply, START_TEXT);
   assert.match(reply, /URET Control Bot MVP v0\.1/);
   assert.match(reply, /phone-first/);
-  assert.match(reply, /create new Opportunities through guided questions/);
+  assert.match(reply, /create new Opportunities and Specs through guided questions/);
   assert.match(reply, /never changes or deletes existing URET records/);
-  assert.deepStrictEqual(reply.match(/^\/\w+/gm), SEVEN);
+  assert.deepStrictEqual(reply.match(/^\/\w+/gm), EIGHT);
   assert.doesNotMatch(reply, /notion|hermes|connected/i);
 });
 
-test("/help lists exactly the seven commands", async () => {
+test("/help lists exactly the eight commands", async () => {
   const { router } = setup();
   const { reply } = await router.route({ text: "/help", chatId: 1 });
   assert.strictEqual(reply, HELP_TEXT);
-  assert.deepStrictEqual(reply.match(/^\/\w+/gm), SEVEN);
+  assert.deepStrictEqual(reply.match(/^\/\w+/gm), EIGHT);
   assert.match(reply, /^\/show <URET-ID> /m);
 });
 
@@ -222,7 +222,7 @@ test("/show with no argument returns the exact usage text and reads nothing", as
   const { router } = setup({ notion });
   for (const text of ["/show", "/show   ", "/show@UretBot"]) {
     const out = await router.route({ text, chatId: 1 });
-    assert.strictEqual(out.reply, "Usage: /show <URET-ID>\nExample: /show OPP-001");
+    assert.strictEqual(out.reply, "Usage: /show <URET-ID>\nExamples: /show OPP-001, /show SPEC-001");
   }
   assert.strictEqual(notion.calls.length, 0);
 });
@@ -230,9 +230,9 @@ test("/show with no argument returns the exact usage text and reads nothing", as
 test("/show rejects malformed IDs without reading Notion", async () => {
   const notion = fakeNotion();
   const { router } = setup({ notion });
-  for (const text of ["/show OPP-0", "/show SPEC-1", "/show pharmacy", "/show OPP-1 extra", "/show OPP1"]) {
+  for (const text of ["/show OPP-0", "/show SPEC-0", "/show SPC-1", "/show WP-1", "/show EVD-1", "/show pharmacy", "/show OPP-1 extra", "/show OPP1"]) {
     const out = await router.route({ text, chatId: 1 });
-    assert.strictEqual(out.reply, "Invalid URET ID. Example: /show OPP-001", text);
+    assert.strictEqual(out.reply, "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001", text);
   }
   assert.strictEqual(notion.calls.length, 0);
 });

@@ -26,6 +26,8 @@ const PAGE_SIZE = 100;
 const MAX_STATUS_PAGES = 10;
 // Bounds discovery on a very large root page; beyond it the result is ambiguous.
 const MAX_CHILD_PAGES = 10;
+// Linked records listed by /show (more are marked as such).
+const MAX_LINKED = 10;
 
 // Opportunities: required properties and types (Status options checked separately).
 const REQUIRED_SCHEMA = {
@@ -325,6 +327,38 @@ function createNotionReader({ client, rootPageId }) {
   }
 
   /**
+   * URET IDs of the records of `type` whose relation property `relation`
+   * contains the page `pageId` (for example the Opportunity whose "Specs"
+   * include a given Spec). Returns { uretIds, more }; trashed records and
+   * empty URET IDs are left out.
+   */
+  async function findLinkedUretIds(type, relation, pageId, { signal } = {}) {
+    const def = Object.prototype.hasOwnProperty.call(SOURCES, type) ? SOURCES[type] : null;
+    if (!def) throw new TypeError("unknown source type");
+    if (def.schema[relation] !== "relation") throw new TypeError("not a relation of this source type");
+    if (typeof pageId !== "string" || pageId === "") throw new TypeError("page ID required");
+    return withSource(type, signal, async (source) => {
+      const res = await call(
+        () =>
+          client.dataSources.query({
+            data_source_id: source.dataSourceId,
+            filter: { property: relation, relation: { contains: pageId } },
+            page_size: MAX_LINKED,
+          }),
+        signal
+      );
+      const uretIds = ((res && res.results) || [])
+        .filter((item) => item && item.object === "page" && !isTrashed(item))
+        .map((item) => {
+          const prop = item.properties && item.properties["URET ID"];
+          return prop && prop.type === "rich_text" ? plainTitle(prop.rich_text).trim() : "";
+        })
+        .filter((id) => id !== "");
+      return { uretIds, more: Boolean(res && res.has_more) };
+    });
+  }
+
+  /**
    * ID of the verified data source for a source type, discovering it if
    * needed; refused if its schema is invalid. For the write adapter only:
    * the ID stays inside the process and is never logged or shown.
@@ -377,6 +411,7 @@ function createNotionReader({ client, rootPageId }) {
   return {
     countByStatus,
     findByUretId,
+    findLinkedUretIds,
     getDataSourceId,
     health,
     // For tests: whether a source type's data source is currently remembered.

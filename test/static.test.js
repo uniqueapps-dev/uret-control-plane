@@ -201,14 +201,14 @@ test("no page API, generic request, search or mutation call anywhere in bot/ (th
 
 // --- Scope ------------------------------------------------------------------------------
 
-// Phase 3-5 steps 1 and 5 (interim, finalised in step 10): the read adapter
-// knows all five URET data sources; the write adapter the three it creates in.
-test("other URET data source titles appear only in the Notion adapters", () => {
-  const otherSources = /URET\s*[‐-―-]\s*(?:Specs|Work Packages|Evidence|Releases)\b/;
+// Phase 3-5 steps 1, 5 and 7 (interim, finalised in step 10): the read adapter
+// knows all five URET data sources; Specs and Work Packages may be named
+// anywhere (they are created and shown); Evidence and Releases only there.
+test("the Evidence and Releases titles appear only in the read adapter", () => {
   const notCreatable = /URET\s*[‐-―-]\s*(?:Evidence|Releases)\b/;
   for (const { file, text } of sources) {
     if (file === ADAPTER_FILE) continue;
-    assert.doesNotMatch(text, file === WRITER_FILE ? notCreatable : otherSources, file);
+    assert.doesNotMatch(text, notCreatable, file);
   }
 });
 

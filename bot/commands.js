@@ -1,8 +1,8 @@
 "use strict";
 
 /**
- * Command router. /start, /help, /cancel, /status, /show, /health and
- * /new_opportunity do something. Plain text answers an active capture
+ * Command router. /start, /help, /cancel, /status, /show, /health,
+ * /new_opportunity and /new_spec do something. Plain text answers an active capture
  * session (see captureFlows.js); any other input gets a pointer to /help.
  *
  * Handlers are asynchronous and always awaited. /status, /show and /health
@@ -22,9 +22,10 @@ const COMMAND_LIST = [
   "/help - list commands",
   "/cancel - cancel the current interaction",
   "/status - Opportunity counts (read-only)",
-  "/show <URET-ID> - one Opportunity (read-only)",
+  "/show <URET-ID> - one Opportunity or Spec (read-only)",
   "/health - health check",
   "/new_opportunity - create an Opportunity (guided)",
+  "/new_spec <OPP-ID> - create a Spec for an Opportunity (guided)",
 ].join("\n");
 
 const START_TEXT = [
@@ -35,7 +36,7 @@ const START_TEXT = [
   "Available commands:",
   COMMAND_LIST,
   "",
-  "It can create new Opportunities through guided questions.",
+  "It can create new Opportunities and Specs through guided questions.",
   "It never changes or deletes existing URET records.",
 ].join("\n");
 
@@ -97,6 +98,12 @@ function createRouter({ sessions, configStatus, logDir, notion = null, writer = 
     }
   }
 
+  async function startFlow(command, chatId, args, signal) {
+    if (!flows.ready) return { reply: NOT_CONFIGURED_TEXT, label: "notion_not_configured" };
+    const result = await read(() => flows.start(chatId, command, args, signal));
+    return result.reply ? result : result.value;
+  }
+
   const handlers = {
     start: async () => ({ reply: START_TEXT }),
     help: async () => ({ reply: HELP_TEXT }),
@@ -113,15 +120,20 @@ function createRouter({ sessions, configStatus, logDir, notion = null, writer = 
     },
     show: async ({ args, signal }) => {
       if (!args) return { reply: opp.SHOW_USAGE };
-      const uretId = opp.normalizeUretId(args);
-      if (!uretId) return { reply: opp.INVALID_ID_TEXT };
+      const parsed = opp.parseShowId(args);
+      if (!parsed) return { reply: opp.INVALID_ID_TEXT };
+      const { type, uretId } = parsed;
       if (!notion) return { reply: NOT_CONFIGURED_TEXT, label: "notion_not_configured" };
-      const result = await read(() => notion.findByUretId("opp", uretId, { signal }));
+      const result = await read(() => notion.findByUretId(type, uretId, { signal }));
       if (result.reply) return result;
       const found = result.value;
       if (found.result === "not_found") return { reply: opp.notFoundText(uretId) };
       if (found.result === "duplicate") return { reply: opp.duplicateText(uretId), label: "notion_duplicate_id" };
-      return { reply: opp.buildShowReply(found.page) };
+      if (type === "opp") return { reply: opp.buildShowReply(found.page) };
+      // A Spec shows its Opportunity by URET ID (the two-way "Specs" relation).
+      const linked = await read(() => notion.findLinkedUretIds("opp", "Specs", found.page.id, { signal }));
+      if (linked.reply) return linked;
+      return { reply: opp.buildSpecShowReply(uretId, found.page, linked.value) };
     },
     health: async ({ signal }) => {
       const { text, label } = await buildHealthReport({
@@ -134,10 +146,8 @@ function createRouter({ sessions, configStatus, logDir, notion = null, writer = 
       });
       return { reply: text, label: label || undefined };
     },
-    new_opportunity: async ({ chatId }) => {
-      if (!flows.ready) return { reply: NOT_CONFIGURED_TEXT, label: "notion_not_configured" };
-      return flows.start(chatId, "new_opportunity");
-    },
+    new_opportunity: async ({ chatId, signal }) => startFlow("new_opportunity", chatId, "", signal),
+    new_spec: async ({ chatId, args, signal }) => startFlow("new_spec", chatId, args, signal),
   };
 
   /**
