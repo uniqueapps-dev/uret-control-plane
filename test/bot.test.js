@@ -10,7 +10,8 @@ const { createBot } = require("../bot/index");
 const { createLogger } = require("../bot/logger");
 const { createSessionStore } = require("../bot/session");
 const { createTelegramClient, TelegramError } = require("../bot/telegram");
-const { HELP_TEXT, CANCEL_TEXT } = require("../bot/commands");
+const { HELP_TEXT } = require("../bot/commands");
+const { NO_SESSION_TEXT } = require("../bot/captureSession");
 const { APIResponseError, RequestTimeoutError } = require("@notionhq/client");
 const { createNotionReader } = require("../bot/notion");
 const { AUTHORIZED_ID, OTHER_ID, fakeToken, fakeNotionToken, fakePageId, dashedId, tempDir, message, captureStream, fakeTelegramFetch, waitFor } = require("./helpers");
@@ -85,7 +86,7 @@ test("drops queued updates at startup, then routes only authorized private messa
   assert.strictEqual(replies[0].text, HELP_TEXT);
   assert.match(replies[1].text, /Notion configuration: NOT OK/);
   assert.match(replies[1].text, /Hermes: Not used \/ isolated legacy system/);
-  assert.strictEqual(replies[2].text, CANCEL_TEXT);
+  assert.strictEqual(replies[2].text, NO_SESSION_TEXT);
   assert.match(replies[3].text, /Unknown command/);
   assert.strictEqual(ctx.sessions.get(AUTHORIZED_ID), null, "/cancel did not clear the session");
 
@@ -542,4 +543,35 @@ test("the entry point starts with a valid Notion config without reading Notion u
   assert.match(log, /"event":"notion_config","result":"ok"/);
   assert.doesNotMatch(output, /unexpected request/, "Notion was contacted at startup");
   for (const secret of [notionToken, root, dashedId(root)]) assert.ok(!output.includes(secret) && !log.includes(secret), "secret leaked");
+});
+
+test("a full /new_opportunity run logs only the command name: no answers, no IDs", async (t) => {
+  const { createRouter } = require("../bot/commands");
+  const answers = ["Secret title words", "2", "Project zeta", "Problem omega", "Users kappa", "Metrics sigma", "Action lambda"];
+  const created = [];
+  const router = createRouter({
+    sessions: createSessionStore(),
+    configStatus: { TELEGRAM_BOT_TOKEN: "valid", TELEGRAM_ALLOWED_USER_ID: "valid" },
+    logDir: tempDir(),
+    notion: { findByUretId: async () => ({ result: "not_found" }) },
+    writer: { createRecord: async (type, record) => (created.push(record), { uretId: record.uretId }) },
+    reserveId: async () => "OPP-042",
+  });
+  const ctx = setup(t, {
+    router,
+    getUpdatesResponses: [ok([]), ok(["/new_opportunity", ...answers].map((text, i) => message({ updateId: 60 + i, text })))],
+  });
+  const running = ctx.bot.start();
+  await waitFor(() => ctx.sent().length >= 8);
+  await ctx.bot.stop();
+  await running;
+
+  assert.strictEqual(created.length, 1);
+  assert.match(ctx.sent()[7].body.text, /^Created OPP-042\n/);
+  const commands = ctx.logRecords().filter((r) => r.event === "command");
+  assert.deepStrictEqual(commands.map((r) => [r.command, r.result]), Array(8).fill(["new_opportunity", "ok"]));
+  const everything = ctx.logText() + ctx.out.text();
+  for (const secretish of [...answers.filter((a) => a.length > 1), "OPP-042", String(AUTHORIZED_ID)]) {
+    assert.ok(!everything.includes(secretish), `log contains ${secretish}`);
+  }
 });

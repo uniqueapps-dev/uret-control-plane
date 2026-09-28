@@ -618,7 +618,7 @@ test("the guard really blocks anything outside the allow-list", () => {
 
 test("the adapter exposes no write operation", () => {
   const reader = fakeWorkspace().reader;
-  assert.deepStrictEqual(Object.keys(reader).sort(), ["countByStatus", "findByUretId", "hasCachedSource", "health"]);
+  assert.deepStrictEqual(Object.keys(reader).sort(), ["countByStatus", "findByUretId", "getDataSourceId", "hasCachedSource", "health"]);
 });
 
 // --- Phase 3-5 step 1: all five URET data sources -----------------------------------
@@ -800,5 +800,25 @@ test("lookups in every source type report duplicates and trashed records the sam
     const trashed = multiWorkspace({ query: { [type]: () => ({ results: [page("x", { in_trash: true })], has_more: false }) } });
     const out = await trashed.reader.findByUretId(type, `${prefix}-001`);
     assert.deepStrictEqual([out.result, out.trashed], ["found", true], type);
+  }
+});
+
+// --- Phase 3-5 step 6: data source ID for the write adapter -----------------------------
+
+test("getDataSourceId discovers once and returns the verified data source ID", async () => {
+  const ws = fakeWorkspace();
+  assert.strictEqual(await ws.reader.getDataSourceId("opp"), ws.dsId);
+  assert.strictEqual(await ws.reader.getDataSourceId("opp"), ws.dsId);
+  assert.strictEqual(ws.count("blocks.children.list"), 1, "discovery repeated");
+  assert.strictEqual(ws.count("dataSources.query"), 0);
+});
+
+test("getDataSourceId refuses an invalid schema, an unknown type, and a missing source", async () => {
+  const bad = fakeWorkspace({ dataSource: { properties: {} } });
+  await rejectsWith(bad.reader.getDataSourceId("opp"), "notion_schema_invalid");
+  const none = fakeWorkspace({ childPages: [[]] });
+  await rejectsWith(none.reader.getDataSourceId("opp"), "notion_source_not_found");
+  for (const type of ["OPP", "x", "__proto__", undefined]) {
+    await assert.rejects(none.reader.getDataSourceId(type), TypeError);
   }
 });

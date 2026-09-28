@@ -9,7 +9,6 @@ const {
   parseCommand,
   START_TEXT,
   HELP_TEXT,
-  CANCEL_TEXT,
   UNKNOWN_TEXT,
   NOT_CONFIGURED_TEXT,
   NOTION_ERROR_TEXT,
@@ -19,7 +18,7 @@ const { createSessionStore } = require("../bot/session");
 const { tempDir } = require("./helpers");
 
 const VALID_STATUS = { TELEGRAM_BOT_TOKEN: "valid", TELEGRAM_ALLOWED_USER_ID: "valid" };
-const SIX = ["/start", "/help", "/cancel", "/status", "/show", "/health"];
+const SEVEN = ["/start", "/help", "/cancel", "/status", "/show", "/health", "/new_opportunity"];
 
 // Error shaped like the adapter's NotionReadError: a fixed label only.
 const labelled = (label) => Object.assign(new Error(`Notion read failed (${label})`), { label });
@@ -66,34 +65,35 @@ test("parseCommand returns the command name and the text after it", () => {
   assert.strictEqual(parseCommand(undefined), null);
 });
 
-test("/start introduces the bot and lists the six commands", async () => {
+test("/start introduces the bot and lists the seven commands", async () => {
   const { router } = setup();
   const { command, reply } = await router.route({ text: "/start", chatId: 1 });
   assert.strictEqual(command, "start");
   assert.strictEqual(reply, START_TEXT);
   assert.match(reply, /URET Control Bot MVP v0\.1/);
   assert.match(reply, /phone-first/);
-  assert.match(reply, /never creates or changes URET records/);
-  assert.deepStrictEqual(reply.match(/^\/\w+/gm), SIX);
+  assert.match(reply, /create new Opportunities through guided questions/);
+  assert.match(reply, /never changes or deletes existing URET records/);
+  assert.deepStrictEqual(reply.match(/^\/\w+/gm), SEVEN);
   assert.doesNotMatch(reply, /notion|hermes|connected/i);
 });
 
-test("/help lists exactly the six commands", async () => {
+test("/help lists exactly the seven commands", async () => {
   const { router } = setup();
   const { reply } = await router.route({ text: "/help", chatId: 1 });
   assert.strictEqual(reply, HELP_TEXT);
-  assert.deepStrictEqual(reply.match(/^\/\w+/gm), SIX);
+  assert.deepStrictEqual(reply.match(/^\/\w+/gm), SEVEN);
   assert.match(reply, /^\/show <URET-ID> /m);
 });
 
-test("/cancel clears the in-memory session and confirms nothing was written", async () => {
+test("/cancel without a capture session clears the Phase 1 session and says there is nothing to cancel", async () => {
   const notion = fakeNotion();
   const { router, sessions } = setup({ notion });
   sessions.set(1, { step: "placeholder" });
   sessions.set(2, { step: "other chat" });
   const { command, reply } = await router.route({ text: "/cancel", chatId: 1 });
   assert.strictEqual(command, "cancel");
-  assert.strictEqual(reply, CANCEL_TEXT);
+  assert.strictEqual(reply, "No active session to cancel.");
   assert.strictEqual(sessions.get(1), null);
   assert.deepStrictEqual(sessions.get(2), { step: "other chat" }, "other sessions must be untouched");
   assert.strictEqual(notion.calls.length, 0);
@@ -101,7 +101,7 @@ test("/cancel clears the in-memory session and confirms nothing was written", as
 
 test("unknown commands and plain text only point to /help; /status and /show are known", async () => {
   const { router } = setup();
-  for (const text of ["/new_opportunity", "/statusx", "/opportunity OPP-001", "hello", "", undefined]) {
+  for (const text of ["/new_opp", "/statusx", "/opportunity OPP-001", "hello", "", undefined]) {
     const { command, reply } = await router.route({ text, chatId: 1 });
     assert.strictEqual(command, "unknown");
     assert.strictEqual(reply, UNKNOWN_TEXT);

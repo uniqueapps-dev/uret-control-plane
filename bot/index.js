@@ -6,7 +6,8 @@
  *
  * Telegram long polling -> authorization -> command router. When Notion is
  * configured, /status, /show and /health read URET Opportunities through the
- * read-only adapter; nothing ever writes URET records.
+ * read-only adapter, and /new_opportunity creates new records through the
+ * write adapter (pages.create only). Existing records are never changed.
  *
  * Usage (Termux):
  *   set -a; . ./.env; set +a; npm run start:bot
@@ -46,8 +47,8 @@ const errorClassOf = (err) => (err && err.errorClass ? err.errorClass : "interna
 const errorLabelOf = (err) => (err && err.errorCode ? `${errorClassOf(err)}_${err.errorCode}` : errorClassOf(err));
 const INTERNAL_ERROR_TEXT = "Internal error.";
 
-function createBot({ config, configStatus, telegram, logger, sessions, notion = null, router: routerOverride, logDir = LOG_DIR, retryDelayMs = RETRY_DELAY_MS, pollTimeoutS = POLL_TIMEOUT_S }) {
-  const router = routerOverride || createRouter({ sessions, configStatus, logDir, notion });
+function createBot({ config, configStatus, telegram, logger, sessions, notion = null, writer = null, reserveId = null, router: routerOverride, logDir = LOG_DIR, retryDelayMs = RETRY_DELAY_MS, pollTimeoutS = POLL_TIMEOUT_S }) {
+  const router = routerOverride || createRouter({ sessions, configStatus, logDir, notion, writer, reserveId });
   const controller = new AbortController();
   let running = false;
   let loop = null;
@@ -182,16 +183,23 @@ async function main() {
   // Notion is optional. The SDK is loaded only when Notion is configured, and
   // nothing is read from Notion until the first command that needs it.
   let notion = null;
+  let writer = null;
+  let reserveId = null;
   if (config.notionConfigured) {
     const { createNotionClient, createNotionReader } = require("./notion");
-    notion = createNotionReader({ client: createNotionClient(config), rootPageId: config.rootPageId });
+    const { createNotionWriteClient, createNotionWriter } = require("./notionWrite");
+    const { reserveNextId } = require("./idCounter");
+    const reader = createNotionReader({ client: createNotionClient(config), rootPageId: config.rootPageId });
+    notion = reader;
+    writer = createNotionWriter({ client: createNotionWriteClient(config), rootPageId: config.rootPageId, resolveDataSource: reader.getDataSourceId });
+    reserveId = (type, { signal } = {}) => reserveNextId(type, reader, { signal });
   } else if (notionStatus.state === "not_ok") {
     // Local console only: names and states, never values.
     process.stderr.write(["Notion configuration: NOT OK", ...describeNotionStatus(notionStatus).map((l) => `  ${l}`)].join("\n") + "\n");
   }
   logger.log({ event: "notion_config", result: notionStatus.state });
 
-  const bot = createBot({ config, configStatus: status, telegram, logger, sessions, notion });
+  const bot = createBot({ config, configStatus: status, telegram, logger, sessions, notion, writer, reserveId });
 
   let stopping = false;
   async function shutdown(signalName) {

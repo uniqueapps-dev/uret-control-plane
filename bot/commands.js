@@ -1,8 +1,9 @@
 "use strict";
 
 /**
- * Command router. /start, /help, /cancel, /status, /show and /health do
- * something; every other input gets a pointer to /help.
+ * Command router. /start, /help, /cancel, /status, /show, /health and
+ * /new_opportunity do something. Plain text answers an active capture
+ * session (see captureFlows.js); any other input gets a pointer to /help.
  *
  * Handlers are asynchronous and always awaited. /status, /show and /health
  * read Notion only through the injected read-only adapter (`notion`), which is
@@ -13,6 +14,8 @@
 
 const { buildHealthReport } = require("./health");
 const opp = require("./opportunities");
+const { createCaptureStore } = require("./captureSession");
+const { createCaptureFlows } = require("./captureFlows");
 
 const COMMAND_LIST = [
   "/start - introduction",
@@ -21,6 +24,7 @@ const COMMAND_LIST = [
   "/status - Opportunity counts (read-only)",
   "/show <URET-ID> - one Opportunity (read-only)",
   "/health - health check",
+  "/new_opportunity - create an Opportunity (guided)",
 ].join("\n");
 
 const START_TEXT = [
@@ -31,12 +35,12 @@ const START_TEXT = [
   "Available commands:",
   COMMAND_LIST,
   "",
-  "Read-only: this bot never creates or changes URET records.",
+  "It can create new Opportunities through guided questions.",
+  "It never changes or deletes existing URET records.",
 ].join("\n");
 
 const HELP_TEXT = ["Commands:", COMMAND_LIST].join("\n");
 
-const CANCEL_TEXT = ["Cancelled the current interaction.", "No URET record was created or changed."].join("\n");
 
 const UNKNOWN_TEXT = "Unknown command. Use /help to see the available commands.";
 
@@ -73,7 +77,14 @@ function parseCommand(text) {
   return match ? { name: match[1].toLowerCase(), args: (match[2] || "").trim() } : null;
 }
 
-function createRouter({ sessions, configStatus, logDir, notion = null }) {
+/**
+ * capture: in-memory capture store (a fresh one if omitted). writer and
+ * reserveId are needed for creation; without them (or without `notion`)
+ * the creation commands reply that Notion is not configured.
+ */
+function createRouter({ sessions, configStatus, logDir, notion = null, writer = null, reserveId = null, capture = createCaptureStore() }) {
+  const flows = createCaptureFlows({ capture, reader: notion, writer, reserveId });
+
   // Runs an adapter read and turns a labelled failure into its fixed reply.
   // Aborts (shutdown) and unlabelled errors propagate to the caller.
   async function read(fn) {
@@ -91,7 +102,7 @@ function createRouter({ sessions, configStatus, logDir, notion = null }) {
     help: async () => ({ reply: HELP_TEXT }),
     cancel: async ({ chatId }) => {
       sessions.clear(chatId);
-      return { reply: CANCEL_TEXT };
+      return { reply: capture.cancel(chatId) };
     },
     status: async ({ signal }) => {
       if (!notion) return { reply: NOT_CONFIGURED_TEXT, label: "notion_not_configured" };
@@ -123,6 +134,10 @@ function createRouter({ sessions, configStatus, logDir, notion = null }) {
       });
       return { reply: text, label: label || undefined };
     },
+    new_opportunity: async ({ chatId }) => {
+      if (!flows.ready) return { reply: NOT_CONFIGURED_TEXT, label: "notion_not_configured" };
+      return flows.start(chatId, "new_opportunity");
+    },
   };
 
   /**
@@ -131,10 +146,21 @@ function createRouter({ sessions, configStatus, logDir, notion = null }) {
    * notion_* label when Notion could not answer normally.
    */
   async function route({ text, chatId, signal }) {
+    capture.cleanupExpiredSessions();
     const parsed = parseCommand(text);
     if (parsed && Object.prototype.hasOwnProperty.call(handlers, parsed.name)) {
       const out = await handlers[parsed.name]({ chatId, args: parsed.args, signal });
       return { command: parsed.name, reply: out.reply, label: out.label };
+    }
+    if (!parsed) {
+      // Plain text (or no text): an answer for an active capture session.
+      const session = capture.getActiveSession(chatId);
+      if (session) {
+        const out = await flows.answer(chatId, text, signal);
+        return { command: session.command, reply: out.reply, label: out.label };
+      }
+      const expired = capture.takeExpiredNotice(chatId);
+      if (expired) return { command: "unknown", reply: expired };
     }
     return { command: "unknown", reply: UNKNOWN_TEXT };
   }
@@ -153,7 +179,6 @@ module.exports = {
   parseCommand,
   START_TEXT,
   HELP_TEXT,
-  CANCEL_TEXT,
   UNKNOWN_TEXT,
   NOT_CONFIGURED_TEXT,
   NOTION_ERROR_TEXT,

@@ -325,6 +325,16 @@ function createNotionReader({ client, rootPageId }) {
   }
 
   /**
+   * ID of the verified data source for a source type, discovering it if
+   * needed; refused if its schema is invalid. For the write adapter only:
+   * the ID stays inside the process and is never logged or shown.
+   */
+  async function getDataSourceId(type, { signal } = {}) {
+    if (!Object.prototype.hasOwnProperty.call(SOURCES, type)) throw new TypeError("unknown source type");
+    return withSource(type, signal, async (source) => source.dataSourceId);
+  }
+
+  /**
    * Read-only health: each field is "ok", "not_ok" or "not_checked", and is
    * "ok" only if its read succeeded during this call.
    *   reachable   - at least one Notion read succeeded
@@ -367,6 +377,7 @@ function createNotionReader({ client, rootPageId }) {
   return {
     countByStatus,
     findByUretId,
+    getDataSourceId,
     health,
     // For tests: whether a source type's data source is currently remembered.
     hasCachedSource: (type = "opp") => Boolean(cache[type]),
