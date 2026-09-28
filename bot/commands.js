@@ -2,7 +2,7 @@
 
 /**
  * Command router. /start, /help, /cancel, /status, /show, /health,
- * /new_opportunity and /new_spec do something. Plain text answers an active capture
+ * /new_opportunity, /new_spec and /new_work do something. Plain text answers an active capture
  * session (see captureFlows.js); any other input gets a pointer to /help.
  *
  * Handlers are asynchronous and always awaited. /status, /show and /health
@@ -22,10 +22,11 @@ const COMMAND_LIST = [
   "/help - list commands",
   "/cancel - cancel the current interaction",
   "/status - Opportunity counts (read-only)",
-  "/show <URET-ID> - one Opportunity or Spec (read-only)",
+  "/show <URET-ID> - one Opportunity, Spec or Work Package (read-only)",
   "/health - health check",
   "/new_opportunity - create an Opportunity (guided)",
   "/new_spec <OPP-ID> - create a Spec for an Opportunity (guided)",
+  "/new_work <SPEC-ID> - create a Work Package for a Spec (guided)",
 ].join("\n");
 
 const START_TEXT = [
@@ -36,7 +37,7 @@ const START_TEXT = [
   "Available commands:",
   COMMAND_LIST,
   "",
-  "It can create new Opportunities and Specs through guided questions.",
+  "It can create new Opportunities, Specs and Work Packages through guided questions.",
   "It never changes or deletes existing URET records.",
 ].join("\n");
 
@@ -130,10 +131,13 @@ function createRouter({ sessions, configStatus, logDir, notion = null, writer = 
       if (found.result === "not_found") return { reply: opp.notFoundText(uretId) };
       if (found.result === "duplicate") return { reply: opp.duplicateText(uretId), label: "notion_duplicate_id" };
       if (type === "opp") return { reply: opp.buildShowReply(found.page) };
-      // A Spec shows its Opportunity by URET ID (the two-way "Specs" relation).
-      const linked = await read(() => notion.findLinkedUretIds("opp", "Specs", found.page.id, { signal }));
+      // A Spec shows its Opportunity, a Work Package its Spec, by URET ID,
+      // found through the reverse side of the two-way relation.
+      const [parentType, relation, build] =
+        type === "spec" ? ["opp", "Specs", opp.buildSpecShowReply] : ["spec", "Work packages", opp.buildWorkShowReply];
+      const linked = await read(() => notion.findLinkedUretIds(parentType, relation, found.page.id, { signal }));
       if (linked.reply) return linked;
-      return { reply: opp.buildSpecShowReply(uretId, found.page, linked.value) };
+      return { reply: build(uretId, found.page, linked.value) };
     },
     health: async ({ signal }) => {
       const { text, label } = await buildHealthReport({
@@ -148,6 +152,7 @@ function createRouter({ sessions, configStatus, logDir, notion = null, writer = 
     },
     new_opportunity: async ({ chatId, signal }) => startFlow("new_opportunity", chatId, "", signal),
     new_spec: async ({ chatId, args, signal }) => startFlow("new_spec", chatId, args, signal),
+    new_work: async ({ chatId, args, signal }) => startFlow("new_work", chatId, args, signal),
   };
 
   /**

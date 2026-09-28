@@ -3,7 +3,7 @@
 /**
  * Pure formatting for the read-only commands: URET ID normalisation,
  * deterministic truncation, value formatting, and the fixed /status and
- * /show reply texts (Opportunities and Specs). No network access, no I/O,
+ * /show reply texts (Opportunities, Specs and Work Packages). No network access, no I/O,
  * no SDK.
  */
 
@@ -13,11 +13,11 @@ const MIN_WORD_CUT = 200;
 const ELLIPSIS = "…";
 const EMPTY = "—";
 
-const SHOW_USAGE = ["Usage: /show <URET-ID>", "Examples: /show OPP-001, /show SPEC-001"].join("\n");
-const INVALID_ID_TEXT = "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001";
+const SHOW_USAGE = ["Usage: /show <URET-ID>", "Examples: /show OPP-001, /show SPEC-001, /show WP-001"].join("\n");
+const INVALID_ID_TEXT = "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001";
 
 // URET ID prefix -> source type key, for the prefixes /show accepts.
-const SHOW_TYPES = { OPP: "opp", SPEC: "spec" };
+const SHOW_TYPES = { OPP: "opp", SPEC: "spec", WP: "wp" };
 
 const STATUS_INTEGRITY_TEXT = ["Notion: Data integrity problem", "Unexpected Opportunity status values found."].join("\n");
 const STATUS_INCOMPLETE_TEXT = [
@@ -42,7 +42,7 @@ function normalizeUretId(input, prefixes = ["OPP"]) {
   return `${prefix}-${digits.padStart(3, "0")}`;
 }
 
-// A /show argument -> { type, uretId } for OPP or SPEC, or null.
+// A /show argument -> { type, uretId } for OPP, SPEC or WP, or null.
 function parseShowId(input) {
   const uretId = normalizeUretId(input, Object.keys(SHOW_TYPES));
   return uretId ? { type: SHOW_TYPES[uretId.split("-")[0]], uretId } : null;
@@ -146,30 +146,55 @@ function buildShowReply(page) {
   return lines.join("\n");
 }
 
+// Linked records by URET ID: "—", "OPP-002" or "OPP-002, OPP-003, …".
+function linkedText(linked) {
+  const ids = (linked && linked.uretIds) || [];
+  return ids.length === 0 ? EMPTY : formatText(ids.join(", ") + (linked.more ? ", " + ELLIPSIS : ""));
+}
+
+// Header, fields and link for a Spec or Work Package; `fields` = [label, value].
+function buildRecordReply(uretId, page, fields) {
+  const properties = (page && page.properties) || {};
+  const lines = [];
+  if (page && (page.in_trash === true || page.archived === true)) lines.push("Archived/trashed record");
+  lines.push(`${uretId} — ${formatProperty(properties.Name)}`, "");
+  for (const [label, value] of fields) lines.push(`${label}: ${value}`);
+  lines.push("", linkLine(page));
+  return lines.join("\n");
+}
+
 /**
  * /show for a Spec. `linked` = { uretIds, more }: the Opportunities whose
  * "Specs" relation includes this Spec.
  */
 function buildSpecShowReply(uretId, page, linked) {
-  const properties = (page && page.properties) || {};
-  const ids = (linked && linked.uretIds) || [];
-  const opportunity = ids.length === 0 ? EMPTY : ids.join(", ") + (linked.more ? ", " + ELLIPSIS : "");
-  const lines = [];
-  if (page && (page.in_trash === true || page.archived === true)) lines.push("Archived/trashed record");
-  lines.push(
-    `${uretId} — ${formatProperty(properties.Name)}`,
-    "",
-    `Version: ${formatProperty(properties.Version)}`,
-    `Opportunity: ${formatText(opportunity)}`,
-    `Status: ${formatProperty(properties.Status)}`,
-    `Summary: ${formatProperty(properties.Summary)}`,
-    `Scope in: ${formatProperty(properties["Scope in"])}`,
-    `Scope out: ${formatProperty(properties["Scope out"])}`,
-    `Constraints: ${formatProperty(properties.Constraints)}`,
-    "",
-    linkLine(page)
-  );
-  return lines.join("\n");
+  const p = (page && page.properties) || {};
+  return buildRecordReply(uretId, page, [
+    ["Version", formatProperty(p.Version)],
+    ["Opportunity", linkedText(linked)],
+    ["Status", formatProperty(p.Status)],
+    ["Summary", formatProperty(p.Summary)],
+    ["Scope in", formatProperty(p["Scope in"])],
+    ["Scope out", formatProperty(p["Scope out"])],
+    ["Constraints", formatProperty(p.Constraints)],
+  ]);
+}
+
+/**
+ * /show for a Work Package. `linked` = { uretIds, more }: the Specs whose
+ * "Work packages" relation includes this Work Package.
+ */
+function buildWorkShowReply(uretId, page, linked) {
+  const p = (page && page.properties) || {};
+  return buildRecordReply(uretId, page, [
+    ["Type", formatProperty(p.Type)],
+    ["Worker", formatProperty(p.Worker)],
+    ["Spec", linkedText(linked)],
+    ["Status", formatProperty(p.Status)],
+    ["Summary", formatProperty(p.Summary)],
+    ["Instructions", formatProperty(p.Instructions)],
+    ["Outputs", formatProperty(p.Outputs)],
+  ]);
 }
 
 const notFoundText = (id) => `Not found: ${id}`;
@@ -202,6 +227,7 @@ module.exports = {
   normalizeUretId,
   parseShowId,
   buildSpecShowReply,
+  buildWorkShowReply,
   truncate,
   richTextToPlain,
   formatText,

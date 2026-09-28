@@ -1,9 +1,10 @@
 "use strict";
 
 /**
- * Guided creation flows: /new_opportunity and /new_spec <OPP-ID>.
+ * Guided creation flows: /new_opportunity, /new_spec <OPP-ID> and
+ * /new_work <SPEC-ID>.
  *
- * A flow with a parent (a Spec's Opportunity) first checks that the parent
+ * A flow with a parent (a Spec's Opportunity, a Work Package's Spec) first checks that the parent
  * exists exactly once in Notion; otherwise no session starts. It then asks
  * its questions one at a time (state in the in-memory capture store),
  * validates each answer, and after the last answer:
@@ -25,6 +26,10 @@ const MAX_ANSWER = 2000;
 const SKIP = "-";
 
 const ASSET_TYPES = ["App/PWA", "Ebook", "Video series", "Landing page / site", "Template"];
+const WORK_TYPES = ["Prototype", "Feature", "Bug fix", "Research", "Hardening"];
+// Worker options as named in Notion. "Emmanuel" is accepted for "Manual".
+const WORKERS = ["Claude Code", "Manual"];
+const WORKER_ALIASES = { emmanuel: "Manual" };
 
 const ACTIVE_SESSION_TEXT = "You already have an active session. Finish it or use /cancel.";
 const TEXT_ONLY_TEXT = "Please answer with text.";
@@ -69,12 +74,15 @@ function version(text) {
   return { value };
 }
 
-function choice(options, what) {
+// A numbered option list; also accepts an option's exact name (any case) or
+// an alias.
+function choice(options, what, aliases = {}) {
   return (text) => {
     const input = text.trim();
     const byNumber = /^[0-9]+$/.test(input) ? options[Number(input) - 1] : undefined;
     const byName = options.find((o) => o.toLowerCase() === input.toLowerCase());
-    const value = byNumber || byName;
+    const byAlias = Object.prototype.hasOwnProperty.call(aliases, input.toLowerCase()) ? aliases[input.toLowerCase()] : undefined;
+    const value = byNumber || byName || byAlias;
     if (!value) return { error: `Invalid ${what}. Reply with a number from 1 to ${options.length}.` };
     return { value };
   };
@@ -152,6 +160,43 @@ const FLOWS = {
         "Status: Draft",
         "",
         "Stored in URET – Specs.",
+      ].join("\n"),
+  },
+  new_work: {
+    type: "wp",
+    name: (parentId) => `New Work Package for ${parentId}`,
+    parent: {
+      type: "spec",
+      prefix: "SPEC",
+      label: "Spec",
+      pageKey: "specPageId",
+      usage: "Usage: /new_work <SPEC-ID>\nExample: /new_work SPEC-001",
+      invalid: "Invalid Spec ID. Example: /new_work SPEC-001",
+    },
+    questions: [
+      { key: "title", label: "Title", prompt: `Title? (max ${MAX_TITLE} characters)`, validate: title },
+      { key: "type", label: "Type", prompt: `Type? Reply with a number:\n${numbered(WORK_TYPES)}`, validate: choice(WORK_TYPES, "type") },
+      {
+        key: "worker",
+        label: "Worker",
+        prompt: `Worker? Reply with a number:\n${numbered(WORKERS)} (Emmanuel)`,
+        validate: choice(WORKERS, "worker", WORKER_ALIASES),
+      },
+      { key: "summary", ...free("Summary") },
+      { key: "instructions", ...free("Instructions") },
+      { key: "outputs", ...free("Outputs") },
+    ],
+    confirmation: (uretId, a, parentId) =>
+      [
+        `Created ${uretId}`,
+        "",
+        `Title: ${formatText(a.title)}`,
+        `Type: ${formatText(a.type)}`,
+        `Worker: ${formatText(a.worker)}`,
+        `Spec: ${parentId}`,
+        "Status: Draft",
+        "",
+        "Stored in URET – Work Packages.",
       ].join("\n"),
   },
 };
@@ -261,6 +306,8 @@ function createCaptureFlows({ capture, reader, writer, reserveId }) {
 module.exports = {
   FLOWS,
   ASSET_TYPES,
+  WORK_TYPES,
+  WORKERS,
   MAX_TITLE,
   MAX_ANSWER,
   ACTIVE_SESSION_TEXT,

@@ -240,10 +240,23 @@ test("Hermes appears only in the /health line", () => {
   assert.ok(sources.find((s) => s.file === "health.js").text.includes(allowed));
 });
 
+// Phase 3-5 step 8 (approved exemption): the Worker option name "Claude Code",
+// as one exact string literal in bot/captureFlows.js, is data, not AI code.
+const WORKER_OPTION = '"Claude Code"';
+const WORKER_OPTION_FILE = "captureFlows.js";
+
 test("no AI provider, webhook, server, GitHub or crawler code", () => {
   const forbidden = /openai|anthropic|claude|gemini|perplexity|llm|setWebhook|webhook|createServer|listen\(|github|puppeteer|playwright|crawl/i;
   for (const { file, text } of sources) {
-    text.split("\n").forEach((line, i) => assert.doesNotMatch(line, forbidden, `${file}:${i + 1}`));
+    const checked = file === WORKER_OPTION_FILE ? text.split(WORKER_OPTION).join('""') : text;
+    checked.split("\n").forEach((line, i) => assert.doesNotMatch(line, forbidden, `${file}:${i + 1}`));
+  }
+});
+
+test("the Worker option exemption covers exactly one literal in one file", () => {
+  for (const { file, text } of sources) {
+    const count = text.split(WORKER_OPTION).length - 1;
+    assert.strictEqual(count, file === WORKER_OPTION_FILE ? 1 : 0, file);
   }
 });
 

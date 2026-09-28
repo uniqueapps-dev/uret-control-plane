@@ -6,8 +6,8 @@
  *
  * Telegram long polling -> authorization -> command router. When Notion is
  * configured, /status, /show and /health read URET Opportunities through the
- * read-only adapter, and /new_opportunity and /new_spec create new records
- * through the write adapter (pages.create only). Existing records are never
+ * read-only adapter, and /new_opportunity, /new_spec and /new_work create new
+ * records through the write adapter (pages.create only). Existing records are never
  * changed.
  *
  * Usage (Termux):

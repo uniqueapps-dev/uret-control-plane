@@ -369,8 +369,8 @@ test("/show SPEC: a failing linked lookup gives the fixed Notion text", async ()
 
 test("/show rejects unknown or malformed prefixes without reading Notion", async () => {
   const h = harness();
-  for (const t of ["/show SPC-001", "/show SPEC-0", "/show SPEC-1a", "/show WP-001", "/show EVD-001", "/show REL-001", "/show SPEC 1"]) {
-    assert.strictEqual((await h.send(t)).reply, "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001", t);
+  for (const t of ["/show SPC-001", "/show SPEC-0", "/show SPEC-1a", "/show WPX-001", "/show EVD-001", "/show REL-001", "/show SPEC 1"]) {
+    assert.strictEqual((await h.send(t)).reply, "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001", t);
   }
   assert.strictEqual(h.calls.length, 0);
 });
@@ -382,8 +382,9 @@ test("/show OPP keeps its Phase 2A format and does no linked lookup", async () =
   assert.strictEqual(h.count("findLinkedUretIds"), 0);
 });
 
-test("parseShowId maps OPP and SPEC to their source types", () => {
+test("parseShowId maps OPP, SPEC and WP to their source types", () => {
   assert.deepStrictEqual(opp.parseShowId(" spec-0042 "), { type: "spec", uretId: "SPEC-042" });
   assert.deepStrictEqual(opp.parseShowId("OPP-1000"), { type: "opp", uretId: "OPP-1000" });
-  for (const bad of ["WP-1", "SPEC-", "SPEC-0", "", undefined, "constructor-1", "__proto__-1"]) assert.strictEqual(opp.parseShowId(bad), null, String(bad));
+  assert.deepStrictEqual(opp.parseShowId("wp-7"), { type: "wp", uretId: "WP-007" });
+  for (const bad of ["EVD-1", "REL-1", "SPEC-", "SPEC-0", "", undefined, "constructor-1", "__proto__-1"]) assert.strictEqual(opp.parseShowId(bad), null, String(bad));
 });

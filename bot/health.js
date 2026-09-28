@@ -13,7 +13,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { VARIABLES } = require("./config");
 
-const EXPECTED_COMMAND_COUNT = 8;
+const EXPECTED_COMMAND_COUNT = 9;
 const STATE_TEXT = { ok: "OK", not_ok: "NOT OK", not_checked: "NOT CHECKED" };
 
 // Creates the directory if needed, then writes and removes a probe file.

@@ -54,8 +54,8 @@ test("invalid URET IDs are rejected", () => {
 });
 
 test("usage and invalid-ID texts are exact", () => {
-  assert.strictEqual(opp.SHOW_USAGE, "Usage: /show <URET-ID>\nExamples: /show OPP-001, /show SPEC-001");
-  assert.strictEqual(opp.INVALID_ID_TEXT, "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001");
+  assert.strictEqual(opp.SHOW_USAGE, "Usage: /show <URET-ID>\nExamples: /show OPP-001, /show SPEC-001, /show WP-001");
+  assert.strictEqual(opp.INVALID_ID_TEXT, "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001");
   assert.strictEqual(opp.notFoundText("OPP-001"), "Not found: OPP-001");
   assert.strictEqual(opp.duplicateText("OPP-001"), "Notion: Data integrity problem\nDuplicate URET ID: OPP-001");
 });
