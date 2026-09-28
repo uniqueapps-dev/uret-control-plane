@@ -324,7 +324,7 @@ test("an invalid schema blocks /status and /show reads", async () => {
   const props = validProperties(["Idea"]);
   const ws = fakeWorkspace({ dataSource: { properties: props } });
   await rejectsWith(ws.reader.countByStatus(), "notion_schema_invalid");
-  await rejectsWith(ws.reader.findByUretId("OPP-001"), "notion_schema_invalid");
+  await rejectsWith(ws.reader.findByUretId("opp", "OPP-001"), "notion_schema_invalid");
   assert.strictEqual(ws.count("dataSources.query"), 0);
 });
 
@@ -400,7 +400,7 @@ test("a data integrity problem takes priority over an incomplete scan", async ()
 
 test("exact lookup sends an equals filter with page_size 2", async () => {
   const ws = fakeWorkspace({ query: () => ({ results: [page("Idea")], has_more: false }) });
-  const found = await ws.reader.findByUretId("OPP-001");
+  const found = await ws.reader.findByUretId("opp", "OPP-001");
   assert.strictEqual(found.result, "found");
   assert.strictEqual(found.trashed, false);
   const query = ws.calls.find((c) => c.method === "dataSources.query").args;
@@ -417,7 +417,7 @@ test("lookup reports zero, duplicate and trashed results", async () => {
   ];
   for (const [response, result, trashed] of cases) {
     const ws = fakeWorkspace({ query: () => response });
-    const out = await ws.reader.findByUretId("OPP-002");
+    const out = await ws.reader.findByUretId("opp", "OPP-002");
     assert.strictEqual(out.result, result);
     assert.strictEqual(out.trashed, trashed);
     if (result !== "found") assert.strictEqual(out.page, null, "a record was chosen despite ambiguity");
@@ -541,7 +541,7 @@ test("a timeout during /show lookup fails once with notion_timeout", async () =>
       throw new RequestTimeoutError();
     },
   });
-  await rejectsWith(ws.reader.findByUretId("OPP-001"), "notion_timeout");
+  await rejectsWith(ws.reader.findByUretId("opp", "OPP-001"), "notion_timeout");
   assert.strictEqual(ws.count("dataSources.query"), 1);
   assert.strictEqual(ws.reader.hasCachedSource(), true, "a timeout must not forget the source");
 });
@@ -561,7 +561,7 @@ test("an already-aborted signal makes no Notion call", async () => {
   const ws = fakeWorkspace();
   const controller = new AbortController();
   controller.abort();
-  await rejectsWith(ws.reader.findByUretId("OPP-001", { signal: controller.signal }), "notion_aborted");
+  await rejectsWith(ws.reader.findByUretId("opp", "OPP-001", { signal: controller.signal }), "notion_aborted");
   assert.strictEqual(ws.calls.length, 0);
 });
 
@@ -598,7 +598,7 @@ test("the adapter touches only the four permitted read methods", async () => {
   const ws = fakeWorkspace({ query: () => ({ results: [page("Idea")], has_more: false }) });
   await ws.reader.health();
   await ws.reader.countByStatus();
-  await ws.reader.findByUretId("OPP-001");
+  await ws.reader.findByUretId("opp", "OPP-001");
   for (const { method } of ws.calls) assert.ok(PERMITTED.includes(method), method);
   assert.deepStrictEqual([...new Set(ws.calls.map((c) => c.method))].sort(), [...PERMITTED].sort());
 });
@@ -619,4 +619,186 @@ test("the guard really blocks anything outside the allow-list", () => {
 test("the adapter exposes no write operation", () => {
   const reader = fakeWorkspace().reader;
   assert.deepStrictEqual(Object.keys(reader).sort(), ["countByStatus", "findByUretId", "hasCachedSource", "health"]);
+});
+
+// --- Phase 3-5 step 1: all five URET data sources -----------------------------------
+
+const TYPE_TITLES = {
+  opp: "URET – Opportunities",
+  spec: "URET – Specs",
+  wp: "URET – Work Packages",
+  evd: "URET – Evidence",
+  rel: "URET – Releases",
+};
+
+function schemaFor(type) {
+  if (type === "opp") return validProperties();
+  const p = (id, t, extra = {}) => ({ id, type: t, [t]: extra });
+  if (type === "spec") {
+    return {
+      "URET ID": p("uid", "rich_text"), Name: p("title", "title"), Opportunity: p("opp", "relation"),
+      Version: p("ver", "rich_text"), Summary: p("sum", "rich_text"), "Scope in": p("sin", "rich_text"),
+      "Scope out": p("sout", "rich_text"), Constraints: p("con", "rich_text"),
+      Status: p("stat", "select", { options: ["Draft", "Approved", "Superseded"].map((name) => ({ name })) }),
+      Repo: p("repo", "url"), Branch: p("br", "rich_text"), "Work packages": p("wps", "relation"), Releases: p("rels", "relation"),
+    };
+  }
+  if (type === "wp") {
+    return {
+      "URET ID": p("uid", "rich_text"), Name: p("title", "title"), Spec: p("spec", "relation"),
+      Type: p("type", "select", { options: [] }), Worker: p("wrk", "select", { options: [] }), Status: p("stat", "select", { options: [] }),
+      Summary: p("sum", "rich_text"), Instructions: p("ins", "rich_text"), Outputs: p("out", "rich_text"),
+      "Commit / PR": p("pr", "url"), "Start date": p("sd", "date"), "End date": p("ed", "date"), Evidence: p("evd", "relation"),
+    };
+  }
+  return { "URET ID": p("uid", "rich_text"), Name: p("title", "title") };
+}
+
+// Fake workspace with a database per type (all five by default), guarded so
+// only the four permitted read methods exist. `extraBlocks` adds more child
+// blocks; `properties[type]` overrides a schema; `query[type]` answers queries.
+function multiWorkspace({ types = Object.keys(TYPE_TITLES), extraBlocks = [], properties = {}, query = {} } = {}) {
+  const root = fakePageId();
+  const calls = [];
+  const byDb = {};
+  const byDs = {};
+  const blocks = [];
+  for (const type of types) {
+    const dbId = fakePageId();
+    const dsId = fakePageId();
+    byDb[dbId] = { object: "database", id: dbId, in_trash: false, parent: { type: "page_id", page_id: root }, data_sources: [{ id: dsId }] };
+    byDs[dsId] = {
+      object: "data_source", id: dsId, in_trash: false, title: rt(TYPE_TITLES[type]),
+      database_parent: { type: "page_id", page_id: root }, properties: properties[type] || schemaFor(type), type,
+    };
+    blocks.push({ object: "block", id: dbId, type: "child_database", child_database: { title: TYPE_TITLES[type] } });
+  }
+  const raw = {
+    blocks: { children: { list: async (args) => { calls.push({ method: "blocks.children.list", args }); return { results: [...blocks, ...extraBlocks], has_more: false }; } } },
+    databases: { retrieve: async (args) => { calls.push({ method: "databases.retrieve", args }); return byDb[args.database_id] || extraBlocks.find((b) => b.id === args.database_id)?.db; } },
+    dataSources: {
+      retrieve: async (args) => { calls.push({ method: "dataSources.retrieve", args }); return byDs[args.data_source_id]; },
+      query: async (args) => {
+        calls.push({ method: "dataSources.query", args });
+        const type = byDs[args.data_source_id].type;
+        return query[type] ? query[type](args) : { results: [], has_more: false };
+      },
+    },
+  };
+  const reader = notion.createNotionReader({ client: guard(raw), rootPageId: root });
+  const count = (method) => calls.filter((c) => c.method === method).length;
+  const typeOfQuery = (c) => byDs[c.args.data_source_id].type;
+  return { root, calls, count, reader, typeOfQuery };
+}
+
+test("the five source types have the expected titles and ID prefixes", () => {
+  const summary = Object.fromEntries(Object.entries(notion.SOURCES).map(([k, v]) => [k, [v.title, v.prefix]]));
+  assert.deepStrictEqual(summary, {
+    opp: ["URET – Opportunities", "OPP"],
+    spec: ["URET – Specs", "SPEC"],
+    wp: ["URET – Work Packages", "WP"],
+    evd: ["URET – Evidence", "EVD"],
+    rel: ["URET – Releases", "REL"],
+  });
+});
+
+test("verified Specs and Work Packages schemas pass; a missing property is reported", () => {
+  for (const type of ["spec", "wp", "evd", "rel"]) {
+    assert.deepStrictEqual(notion.verifySchema({ properties: schemaFor(type) }, type), { ok: true, problems: [] }, type);
+  }
+  const spec = schemaFor("spec");
+  delete spec.Opportunity;
+  spec.Version = { id: "ver", type: "number", number: {} };
+  assert.deepStrictEqual(notion.verifySchema({ properties: spec }, "spec").problems, ["missing:Opportunity", "type:Version"]);
+  const wp = schemaFor("wp");
+  delete wp.Spec;
+  assert.deepStrictEqual(notion.verifySchema({ properties: wp }, "wp").problems, ["missing:Spec"]);
+  // Only Opportunities requires specific Status options.
+  assert.deepStrictEqual(notion.verifySchema({ properties: schemaFor("opp") }), { ok: true, problems: [] });
+});
+
+test("typed lookup discovers and queries only the requested source", async () => {
+  const ws = multiWorkspace({ query: { spec: () => ({ results: [page("Draft")], has_more: false }) } });
+  const out = await ws.reader.findByUretId("spec", "SPEC-001");
+  assert.strictEqual(out.result, "found");
+  assert.strictEqual(ws.count("databases.retrieve"), 1);
+  assert.strictEqual(ws.count("dataSources.retrieve"), 1);
+  const q = ws.calls.find((c) => c.method === "dataSources.query");
+  assert.strictEqual(ws.typeOfQuery(q), "spec");
+  assert.deepStrictEqual(q.args.filter, { property: "URET ID", rich_text: { equals: "SPEC-001" } });
+  assert.strictEqual(q.args.page_size, 2);
+  assert.strictEqual(ws.reader.hasCachedSource("spec"), true);
+  assert.strictEqual(ws.reader.hasCachedSource("opp"), false, "Opportunities discovered without need");
+});
+
+test("each source type is discovered once, lazily, and remembered separately", async () => {
+  const ws = multiWorkspace();
+  await ws.reader.findByUretId("spec", "SPEC-001");
+  await ws.reader.findByUretId("wp", "WP-001");
+  await ws.reader.findByUretId("spec", "SPEC-002");
+  await ws.reader.findByUretId("evd", "EVD-001");
+  await ws.reader.findByUretId("rel", "REL-001");
+  await ws.reader.countByStatus();
+  assert.strictEqual(ws.count("blocks.children.list"), 5, "one scan per type discovered");
+  assert.strictEqual(ws.count("databases.retrieve"), 5);
+  for (const type of Object.keys(TYPE_TITLES)) assert.strictEqual(ws.reader.hasCachedSource(type), true, type);
+});
+
+test("Opportunities, /status and /health keep working when another source is missing or broken", async () => {
+  const noSpecs = multiWorkspace({ types: ["opp", "wp", "evd", "rel"] });
+  await rejectsWith(noSpecs.reader.findByUretId("spec", "SPEC-001"), "notion_source_not_found");
+  assert.strictEqual((await noSpecs.reader.countByStatus()).outcome, "counts");
+  assert.deepStrictEqual(await noSpecs.reader.health(), { reachable: "ok", sourceFound: "ok", schemaValid: "ok", label: null });
+
+  const badSpecs = schemaFor("spec");
+  delete badSpecs.Opportunity;
+  const broken = multiWorkspace({ properties: { spec: badSpecs } });
+  await rejectsWith(broken.reader.findByUretId("spec", "SPEC-001"), "notion_schema_invalid");
+  assert.strictEqual(broken.count("dataSources.query"), 0, "queried a source with an invalid schema");
+  assert.strictEqual((await broken.reader.findByUretId("opp", "OPP-001")).result, "not_found");
+});
+
+test("duplicate databases for a type are ambiguous; no candidate is chosen", async () => {
+  const twin = { object: "block", id: fakePageId(), type: "child_database", child_database: { title: "URET - Specs" } };
+  const ws = multiWorkspace({ extraBlocks: [twin] });
+  await rejectsWith(ws.reader.findByUretId("spec", "SPEC-001"), "notion_source_ambiguous");
+  assert.strictEqual(ws.count("databases.retrieve"), 0);
+  assert.strictEqual((await ws.reader.findByUretId("wp", "WP-001")).result, "not_found", "other types affected");
+});
+
+test("a not-found source is forgotten only for its own type", async () => {
+  let fail = false;
+  const ws = multiWorkspace({
+    query: {
+      spec: () => {
+        if (fail) throw new APIResponseError({ code: "object_not_found", status: 404, message: "gone", headers: {}, rawBodyText: "{}" });
+        return { results: [], has_more: false };
+      },
+    },
+  });
+  await ws.reader.findByUretId("spec", "SPEC-001");
+  await ws.reader.findByUretId("opp", "OPP-001");
+  fail = true;
+  await rejectsWith(ws.reader.findByUretId("spec", "SPEC-001"), "notion_not_found");
+  assert.strictEqual(ws.reader.hasCachedSource("spec"), false);
+  assert.strictEqual(ws.reader.hasCachedSource("opp"), true);
+});
+
+test("typed lookup rejects unknown types and mismatched prefixes without any Notion call", async () => {
+  const ws = multiWorkspace();
+  for (const [type, id] of [["spec", "OPP-001"], ["opp", "SPEC-001"], ["wp", "WPX-1"], ["xyz", "X-001"], ["spec", undefined]]) {
+    await assert.rejects(ws.reader.findByUretId(type, id), TypeError, `${type} ${id}`);
+  }
+  assert.strictEqual(ws.calls.length, 0);
+});
+
+test("lookups in every source type report duplicates and trashed records the same way", async () => {
+  for (const type of ["spec", "wp", "evd", "rel"]) {
+    const prefix = notion.SOURCES[type].prefix;
+    const dup = multiWorkspace({ query: { [type]: () => ({ results: [page("x"), page("y")], has_more: false }) } });
+    assert.strictEqual((await dup.reader.findByUretId(type, `${prefix}-001`)).result, "duplicate", type);
+    const trashed = multiWorkspace({ query: { [type]: () => ({ results: [page("x", { in_trash: true })], has_more: false }) } });
+    const out = await trashed.reader.findByUretId(type, `${prefix}-001`);
+    assert.deepStrictEqual([out.result, out.trashed], ["found", true], type);
+  }
 });

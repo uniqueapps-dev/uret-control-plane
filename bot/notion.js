@@ -1,7 +1,8 @@
 "use strict";
 
 /**
- * Read-only Notion adapter for exactly one data source: "URET – Opportunities".
+ * Read-only Notion adapter for the five URET data sources under the root page:
+ * Opportunities, Specs, Work Packages, Evidence and Releases.
  *
  * This is the only bot module that loads @notionhq/client. It calls only four
  * read operations:
@@ -20,12 +21,13 @@ const { REQUIRED_STATUSES } = require("./opportunities");
 
 const NOTION_VERSION = "2025-09-03";
 const TIMEOUT_MS = 10000;
-const SOURCE_TITLE = "URET – Opportunities";
+const SOURCE_TITLE = "URET – Opportunities"; // the Opportunities source (/status, /health)
 const PAGE_SIZE = 100;
 const MAX_STATUS_PAGES = 10;
 // Bounds discovery on a very large root page; beyond it the result is ambiguous.
 const MAX_CHILD_PAGES = 10;
 
+// Opportunities: required properties and types (Status options checked separately).
 const REQUIRED_SCHEMA = {
   "URET ID": "rich_text",
   Name: "title",
@@ -40,6 +42,51 @@ const REQUIRED_SCHEMA = {
   "Last updated": "last_edited_time",
   Specs: "relation",
   Releases: "relation",
+};
+
+const SPEC_SCHEMA = {
+  "URET ID": "rich_text",
+  Name: "title",
+  Opportunity: "relation",
+  Version: "rich_text",
+  Summary: "rich_text",
+  "Scope in": "rich_text",
+  "Scope out": "rich_text",
+  Constraints: "rich_text",
+  Status: "select",
+  Repo: "url",
+  Branch: "rich_text",
+  "Work packages": "relation",
+  Releases: "relation",
+};
+
+const WORK_PACKAGE_SCHEMA = {
+  "URET ID": "rich_text",
+  Name: "title",
+  Spec: "relation",
+  Type: "select",
+  Worker: "select",
+  Status: "select",
+  Summary: "rich_text",
+  Instructions: "rich_text",
+  Outputs: "rich_text",
+  "Commit / PR": "url",
+  "Start date": "date",
+  "End date": "date",
+  Evidence: "relation",
+};
+
+// Evidence and Releases are only looked up by URET ID, so only what that needs.
+const LOOKUP_SCHEMA = { "URET ID": "rich_text", Name: "title" };
+
+// The five URET data sources, by type key. Only Opportunities also checks
+// Status options (for /status); the others check property names and types.
+const SOURCES = {
+  opp: { title: SOURCE_TITLE, prefix: "OPP", schema: REQUIRED_SCHEMA, statusOptions: REQUIRED_STATUSES },
+  spec: { title: "URET – Specs", prefix: "SPEC", schema: SPEC_SCHEMA },
+  wp: { title: "URET – Work Packages", prefix: "WP", schema: WORK_PACKAGE_SCHEMA },
+  evd: { title: "URET – Evidence", prefix: "EVD", schema: LOOKUP_SCHEMA },
+  rel: { title: "URET – Releases", prefix: "REL", schema: LOOKUP_SCHEMA },
 };
 
 class NotionReadError extends Error {
@@ -98,19 +145,21 @@ const normTitle = (title) =>
 const plainTitle = (richText) => (Array.isArray(richText) ? richText.map((t) => (t && t.plain_text) || "").join("") : "");
 const isTrashed = (obj) => Boolean(obj && (obj.in_trash === true || obj.archived === true));
 
-// Required properties and types, plus the four required Status options.
-function verifySchema(dataSource) {
+// Required properties and types for a source type; for Opportunities also the
+// four required Status options.
+function verifySchema(dataSource, type = "opp") {
+  const source = SOURCES[type];
   const properties = (dataSource && dataSource.properties) || {};
   const problems = [];
-  for (const [name, type] of Object.entries(REQUIRED_SCHEMA)) {
+  for (const [name, type] of Object.entries(source.schema)) {
     const prop = properties[name];
     if (!prop) problems.push(`missing:${name}`);
     else if (prop.type !== type) problems.push(`type:${name}`);
   }
   const status = properties.Status;
-  if (status && status.type === "select") {
+  if (source.statusOptions && status && status.type === "select") {
     const options = new Set(((status.select && status.select.options) || []).map((o) => o && o.name));
-    for (const required of REQUIRED_STATUSES) {
+    for (const required of source.statusOptions) {
       if (!options.has(required)) problems.push(`status_option:${required}`);
     }
   }
@@ -119,8 +168,8 @@ function verifySchema(dataSource) {
 
 function createNotionReader({ client, rootPageId }) {
   const root = normId(rootPageId);
-  // In-memory only; lost on restart.
-  let cached = null; // { dataSourceId, statusPropertyId, schemaOk }
+  // Per source type, in memory only; lost on restart.
+  const cache = {}; // type -> { dataSourceId, statusPropertyId, schemaOk }
   let successfulReads = 0; // lets /health tell "reached Notion" from "never reached"
 
   // Runs one SDK call. Aborting (bot shutdown) abandons it without waiting.
@@ -148,7 +197,7 @@ function createNotionReader({ client, rootPageId }) {
     }
   }
 
-  async function listMatchingChildDatabases(signal) {
+  async function listMatchingChildDatabases(title, signal) {
     const matches = [];
     let cursor;
     for (let page = 0; page < MAX_CHILD_PAGES; page++) {
@@ -158,7 +207,7 @@ function createNotionReader({ client, rootPageId }) {
       );
       for (const block of (res && res.results) || []) {
         if (block && block.type === "child_database" && !isTrashed(block) && block.child_database &&
-            normTitle(block.child_database.title) === normTitle(SOURCE_TITLE)) {
+            normTitle(block.child_database.title) === normTitle(title)) {
           matches.push(block.id);
         }
       }
@@ -169,10 +218,10 @@ function createNotionReader({ client, rootPageId }) {
     throw new NotionReadError("notion_source_ambiguous");
   }
 
-  // Strict discovery under the root page; no workspace search, no guessing.
-  // Returns the verified data source object and caches its ID in memory.
-  async function discover(signal) {
-    const matches = await listMatchingChildDatabases(signal);
+  // Strict discovery of one source type under the root page; no workspace
+  // search, no guessing. Returns the verified data source and caches its ID.
+  async function discover(type, signal) {
+    const matches = await listMatchingChildDatabases(SOURCES[type].title, signal);
     if (matches.length === 0) throw new NotionReadError("notion_source_not_found");
     if (matches.length > 1) throw new NotionReadError("notion_source_ambiguous");
 
@@ -185,38 +234,39 @@ function createNotionReader({ client, rootPageId }) {
     if (sources.length !== 1) throw new NotionReadError(sources.length > 1 ? "notion_source_ambiguous" : "notion_source_invalid");
 
     const dataSource = await call(() => client.dataSources.retrieve({ data_source_id: sources[0].id }), signal);
-    checkSource(dataSource);
-    remember(dataSource);
+    checkSource(type, dataSource);
+    remember(type, dataSource);
     return dataSource;
   }
 
-  function checkSource(dataSource) {
+  function checkSource(type, dataSource) {
     const parent = dataSource && dataSource.database_parent;
     if (!parent || parent.type !== "page_id" || normId(parent.page_id) !== root) throw new NotionReadError("notion_source_invalid");
-    if (normTitle(plainTitle(dataSource.title)) !== normTitle(SOURCE_TITLE)) throw new NotionReadError("notion_source_invalid");
+    if (normTitle(plainTitle(dataSource.title)) !== normTitle(SOURCES[type].title)) throw new NotionReadError("notion_source_invalid");
     if (isTrashed(dataSource)) throw new NotionReadError("notion_source_invalid");
   }
 
-  function remember(dataSource) {
+  function remember(type, dataSource) {
     const status = dataSource.properties && dataSource.properties.Status;
-    cached = { dataSourceId: dataSource.id, statusPropertyId: status && status.id, schemaOk: verifySchema(dataSource).ok };
+    cache[type] = { dataSourceId: dataSource.id, statusPropertyId: status && status.id, schemaOk: verifySchema(dataSource, type).ok };
   }
 
   // A remembered source that Notion no longer finds is forgotten; the next
   // command discovers again (no second attempt inside this command).
-  async function withSource(signal, fn) {
-    if (!cached) await discover(signal);
-    if (!cached.schemaOk) throw new NotionReadError("notion_schema_invalid");
+  async function withSource(type, signal, fn) {
+    if (!cache[type]) await discover(type, signal);
+    const source = cache[type];
+    if (!source.schemaOk) throw new NotionReadError("notion_schema_invalid");
     try {
-      return await fn(cached);
+      return await fn(source);
     } catch (err) {
-      if (err instanceof NotionReadError && err.label === "notion_not_found") cached = null;
+      if (err instanceof NotionReadError && err.label === "notion_not_found") delete cache[type];
       throw err;
     }
   }
 
   async function countByStatus({ signal } = {}) {
-    return withSource(signal, async (source) => {
+    return withSource("opp", signal, async (source) => {
       const counts = Object.fromEntries(REQUIRED_STATUSES.map((s) => [s, 0]));
       let total = 0;
       let unexpected = 0;
@@ -248,9 +298,16 @@ function createNotionReader({ client, rootPageId }) {
     });
   }
 
-  // Exact URET ID lookup. `uretId` must already be canonical (OPP-NNN).
-  async function findByUretId(uretId, { signal } = {}) {
-    return withSource(signal, async (source) => {
+  /**
+   * Exact URET ID lookup in one source type ("opp", "spec", "wp", "evd",
+   * "rel"). `uretId` must already be canonical, with that type's prefix
+   * (OPP-001, SPEC-001, ...).
+   */
+  async function findByUretId(type, uretId, { signal } = {}) {
+    const def = SOURCES[type];
+    if (!def) throw new TypeError("unknown source type");
+    if (typeof uretId !== "string" || !uretId.startsWith(`${def.prefix}-`)) throw new TypeError("URET ID does not match source type");
+    return withSource(type, signal, async (source) => {
       const res = await call(
         () =>
           client.dataSources.query({
@@ -279,12 +336,12 @@ function createNotionReader({ client, rootPageId }) {
     const readsBefore = successfulReads;
     let dataSource;
     try {
-      if (cached) {
-        dataSource = await call(() => client.dataSources.retrieve({ data_source_id: cached.dataSourceId }), signal);
-        checkSource(dataSource);
-        remember(dataSource);
+      if (cache.opp) {
+        dataSource = await call(() => client.dataSources.retrieve({ data_source_id: cache.opp.dataSourceId }), signal);
+        checkSource("opp", dataSource);
+        remember("opp", dataSource);
       } else {
-        dataSource = await discover(signal);
+        dataSource = await discover("opp", signal);
       }
       out.reachable = "ok";
       out.sourceFound = "ok";
@@ -292,7 +349,7 @@ function createNotionReader({ client, rootPageId }) {
       const label = err instanceof NotionReadError ? err.label : "notion_error";
       if (label === "notion_aborted") throw err;
       out.label = label;
-      if (label === "notion_not_found" && cached) cached = null;
+      if (label === "notion_not_found" && cache.opp) delete cache.opp;
       if (successfulReads > readsBefore) {
         out.reachable = "ok";
         out.sourceFound = "not_ok";
@@ -301,7 +358,7 @@ function createNotionReader({ client, rootPageId }) {
       }
       return out;
     }
-    const schema = verifySchema(dataSource);
+    const schema = verifySchema(dataSource, "opp");
     out.schemaValid = schema.ok ? "ok" : "not_ok";
     if (!schema.ok) out.label = "notion_schema_invalid";
     return out;
@@ -311,8 +368,8 @@ function createNotionReader({ client, rootPageId }) {
     countByStatus,
     findByUretId,
     health,
-    // For tests: whether a data source is currently remembered.
-    hasCachedSource: () => cached !== null,
+    // For tests: whether a source type's data source is currently remembered.
+    hasCachedSource: (type = "opp") => Boolean(cache[type]),
   };
 }
 
@@ -321,6 +378,9 @@ module.exports = {
   TIMEOUT_MS,
   SOURCE_TITLE,
   REQUIRED_SCHEMA,
+  SPEC_SCHEMA,
+  WORK_PACKAGE_SCHEMA,
+  SOURCES,
   MAX_STATUS_PAGES,
   NotionReadError,
   createNotionClient,

@@ -105,7 +105,7 @@ function createRouter({ sessions, configStatus, logDir, notion = null }) {
       const uretId = opp.normalizeUretId(args);
       if (!uretId) return { reply: opp.INVALID_ID_TEXT };
       if (!notion) return { reply: NOT_CONFIGURED_TEXT, label: "notion_not_configured" };
-      const result = await read(() => notion.findByUretId(uretId, { signal }));
+      const result = await read(() => notion.findByUretId("opp", uretId, { signal }));
       if (result.reply) return result;
       const found = result.value;
       if (found.result === "not_found") return { reply: opp.notFoundText(uretId) };

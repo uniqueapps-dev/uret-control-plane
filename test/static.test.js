@@ -185,9 +185,14 @@ test("no page API, generic request, search or mutation call anywhere in bot/", (
 
 // --- Scope ------------------------------------------------------------------------------
 
-test("no other URET data source is referenced anywhere in bot/", () => {
+// Phase 3-5 step 1 (interim, finalised in step 10): the read adapter now knows
+// all five URET data sources; their titles may appear only in bot/notion.js.
+test("other URET data source titles appear only in the read adapter", () => {
   const otherSources = /URET\s*[‐-―-]\s*(?:Specs|Work Packages|Evidence|Releases)\b/;
-  for (const { file, text } of sources) assert.doesNotMatch(text, otherSources, file);
+  for (const { file, text } of sources) {
+    if (file === ADAPTER_FILE) continue;
+    assert.doesNotMatch(text, otherSources, file);
+  }
 });
 
 test("no opportunity creation, ID allocation or setup-script use", () => {

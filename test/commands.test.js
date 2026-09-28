@@ -34,8 +34,8 @@ function fakeNotion({ count, find, health } = {}) {
       calls.push({ method: "countByStatus", opts });
       return answer(count, opts);
     },
-    findByUretId: async (id, opts) => {
-      calls.push({ method: "findByUretId", id, opts });
+    findByUretId: async (type, id, opts) => {
+      calls.push({ method: "findByUretId", type, id, opts });
       return answer(find, id, opts);
     },
     health: async (opts) => {
