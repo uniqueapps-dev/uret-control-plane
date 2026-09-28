@@ -12,7 +12,10 @@ const flows = require("../bot/captureFlows");
 const opp = require("../bot/opportunities");
 const { createNotionWriter } = require("../bot/notionWrite");
 const ids = require("../bot/idCounter");
-const { tempDir, fakePageId, dashedId, AUTHORIZED_ID } = require("./helpers");
+const { tempDir, fakePageId, dashedId, AUTHORIZED_ID, forbidRealCounterFile } = require("./helpers");
+
+// This file must never touch the repository's real counter file.
+forbidRealCounterFile();
 
 const MIN = 60 * 1000;
 const USER = AUTHORIZED_ID;
@@ -387,4 +390,14 @@ test("parseShowId maps OPP, SPEC and WP to their source types", () => {
   assert.deepStrictEqual(opp.parseShowId("OPP-1000"), { type: "opp", uretId: "OPP-1000" });
   assert.deepStrictEqual(opp.parseShowId("wp-7"), { type: "wp", uretId: "WP-007" });
   for (const bad of ["EVD-1", "REL-1", "SPEC-", "SPEC-0", "", undefined, "constructor-1", "__proto__-1"]) assert.strictEqual(opp.parseShowId(bad), null, String(bad));
+});
+
+test("an abort (shutdown) during the parent check is passed on and starts no session", async () => {
+  const h = harness({
+    onFind: () => {
+      throw Object.assign(new Error("x"), { label: "notion_aborted" });
+    },
+  });
+  await assert.rejects(h.send("/new_spec OPP-002"), (err) => err.label === "notion_aborted");
+  assert.strictEqual(h.capture.size(), 0);
 });

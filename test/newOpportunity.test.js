@@ -11,7 +11,10 @@ const { createCaptureStore, FIELDS } = require("../bot/captureSession");
 const flows = require("../bot/captureFlows");
 const { createNotionWriter } = require("../bot/notionWrite");
 const ids = require("../bot/idCounter");
-const { tempDir, fakePageId, dashedId, AUTHORIZED_ID } = require("./helpers");
+const { tempDir, fakePageId, dashedId, AUTHORIZED_ID, forbidRealCounterFile } = require("./helpers");
+
+// This file must never touch the repository's real counter file.
+forbidRealCounterFile();
 
 const MIN = 60 * 1000;
 const USER = AUTHORIZED_ID;
@@ -371,4 +374,19 @@ test("answers never reach the logged fields (command and label)", async () => {
   const logged = seen.filter(Boolean).join(" ");
   for (const a of ANSWERS.filter((x) => x.length > 1)) assert.ok(!logged.includes(a), `answer in logged fields: ${a}`);
   assert.deepStrictEqual([...new Set(seen.filter(Boolean))], ["new_opportunity"]);
+});
+
+test("an abort (shutdown) during ID reservation is passed on: counter unchanged, lock released, nothing written", async () => {
+  const h = harness({
+    onFind: () => {
+      throw Object.assign(new Error("x"), { label: "notion_aborted" });
+    },
+  });
+  await h.send("/new_opportunity");
+  for (const a of ANSWERS.slice(0, 6)) await h.send(a);
+  await assert.rejects(h.send(ANSWERS[6]), (err) => err.label === "notion_aborted");
+  assert.strictEqual(h.counter(), 1);
+  assert.strictEqual(fs.existsSync(`${h.file}.lock`), false);
+  assert.strictEqual(h.count("pages.create"), 0);
+  assert.strictEqual(h.capture.getActiveSession(USER), null);
 });

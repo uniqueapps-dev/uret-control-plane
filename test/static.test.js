@@ -287,3 +287,44 @@ test("no source or test file contains a token- or ID-shaped literal", () => {
     }
   }
 });
+
+// Phase 3-5 step 9: tests never touch the repository's real counter file.
+test("every test file that can reach the ID counter installs the real-counter guard", () => {
+  const reaches = /require\(\s*["']\.\.\/bot\/(?:idCounter|index)["']\s*\)/;
+  const files = fs.readdirSync(__dirname).filter((n) => n.endsWith(".test.js"));
+  const guarded = [];
+  for (const f of files) {
+    const code = stripComments(fs.readFileSync(path.join(__dirname, f), "utf8"));
+    if (!reaches.test(code)) continue;
+    assert.match(code, /^forbidRealCounterFile\(\);$/m, `${f} loads the ID counter without forbidRealCounterFile()`);
+    guarded.push(f);
+  }
+  assert.ok(guarded.length >= 5, `only ${guarded.length} guarded files`);
+});
+
+test("tests always pass a temporary file to reserveNextId", () => {
+  for (const f of fs.readdirSync(__dirname).filter((n) => n.endsWith(".js"))) {
+    const code = stripComments(fs.readFileSync(path.join(__dirname, f), "utf8"));
+    for (const m of code.matchAll(/reserveNextId\(([^\n]*)/g)) {
+      if (f === "static.test.js") continue;
+      assert.match(m[1], /\bfile\b/, `${f}: reserveNextId without a file option`);
+    }
+  }
+});
+
+// Phase 3-5 step 9: main() wiring, which runs only with a live configuration.
+test("index.js wires the write adapter and ID reservation as designed", () => {
+  const index = sources.find((s) => s.file === "index.js").code;
+  const main = index.slice(index.indexOf("async function main("));
+  // Loaded only when Notion is configured, inside that branch.
+  const branch = main.slice(main.indexOf("if (config.notionConfigured) {"), main.indexOf("} else if (notionStatus.state"));
+  for (const mod of ["./notion", "./notionWrite", "./idCounter"]) {
+    assert.ok(branch.includes(`require("${mod}")`), `${mod} not loaded in the configured branch`);
+    assert.strictEqual(index.split(`require("${mod}")`).length - 1, 1, `${mod} loaded more than once`);
+  }
+  // A separate client for writes; the resolver is the read adapter's verified discovery.
+  assert.match(branch, /createNotionWriter\(\{ client: createNotionWriteClient\(config\), rootPageId: config\.rootPageId, resolveDataSource: reader\.getDataSourceId \}\)/);
+  // Production reservations use the default (repository) counter file and the read adapter.
+  assert.match(branch, /reserveId = \(type, \{ signal \} = \{\}\) => reserveNextId\(type, reader, \{ signal \}\);/);
+  assert.match(main, /createBot\(\{ config, configStatus: status, telegram, logger, sessions, notion, writer, reserveId \}\)/);
+});

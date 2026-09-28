@@ -10,7 +10,10 @@ const { createCaptureStore, FIELDS } = require("../bot/captureSession");
 const flows = require("../bot/captureFlows");
 const { createNotionWriter } = require("../bot/notionWrite");
 const ids = require("../bot/idCounter");
-const { tempDir, fakePageId, dashedId, AUTHORIZED_ID } = require("./helpers");
+const { tempDir, fakePageId, dashedId, AUTHORIZED_ID, forbidRealCounterFile } = require("./helpers");
+
+// This file must never touch the repository's real counter file.
+forbidRealCounterFile();
 
 const MIN = 60 * 1000;
 const USER = AUTHORIZED_ID;

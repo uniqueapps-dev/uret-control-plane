@@ -5,7 +5,10 @@ const assert = require("node:assert");
 const fs = require("fs");
 const path = require("path");
 const ids = require("../bot/idCounter");
-const { tempDir } = require("./helpers");
+const { tempDir, forbidRealCounterFile } = require("./helpers");
+
+// This file must never touch the repository's real counter file.
+forbidRealCounterFile();
 
 const START = { OPP: 1, SPEC: 0, WP: 0, EVD: 0, REL: 0 };
 

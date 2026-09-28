@@ -14,7 +14,10 @@ const { HELP_TEXT } = require("../bot/commands");
 const { NO_SESSION_TEXT } = require("../bot/captureSession");
 const { APIResponseError, RequestTimeoutError } = require("@notionhq/client");
 const { createNotionReader } = require("../bot/notion");
-const { AUTHORIZED_ID, OTHER_ID, fakeToken, fakeNotionToken, fakePageId, dashedId, tempDir, message, captureStream, fakeTelegramFetch, waitFor } = require("./helpers");
+const { AUTHORIZED_ID, OTHER_ID, fakeToken, fakeNotionToken, fakePageId, dashedId, tempDir, message, captureStream, fakeTelegramFetch, waitFor, forbidRealCounterFile } = require("./helpers");
+
+// This file must never touch the repository's real counter file.
+forbidRealCounterFile();
 
 function setup(t, { getUpdatesResponses, sendMessageResponse, notion = null, router, secrets = [] } = {}) {
   const token = fakeToken();
@@ -545,33 +548,47 @@ test("the entry point starts with a valid Notion config without reading Notion u
   for (const secret of [notionToken, root, dashedId(root)]) assert.ok(!output.includes(secret) && !log.includes(secret), "secret leaked");
 });
 
-test("a full /new_opportunity run logs only the command name: no answers, no IDs", async (t) => {
-  const { createRouter } = require("../bot/commands");
-  const answers = ["Secret title words", "2", "Project zeta", "Problem omega", "Users kappa", "Metrics sigma", "Action lambda"];
-  const created = [];
-  const router = createRouter({
-    sessions: createSessionStore(),
-    configStatus: { TELEGRAM_BOT_TOKEN: "valid", TELEGRAM_ALLOWED_USER_ID: "valid" },
-    logDir: tempDir(),
-    notion: { findByUretId: async () => ({ result: "not_found" }) },
-    writer: { createRecord: async (type, record) => (created.push(record), { uretId: record.uretId }) },
-    reserveId: async () => "OPP-042",
-  });
-  const ctx = setup(t, {
-    router,
-    getUpdatesResponses: [ok([]), ok(["/new_opportunity", ...answers].map((text, i) => message({ updateId: 60 + i, text })))],
-  });
-  const running = ctx.bot.start();
-  await waitFor(() => ctx.sent().length >= 8);
-  await ctx.bot.stop();
-  await running;
+// Every creation command, run in full through the bot: the log holds only the
+// command name, "ok" and fixed labels, never an answer, URET ID, page ID or user ID.
+const CREATION_RUNS = [
+  { command: "new_opportunity", start: "/new_opportunity", answers: ["Secret title words", "2", "Project zeta", "Problem omega", "Users kappa", "Metrics sigma", "Action lambda"], created: "OPP-042" },
+  { command: "new_spec", start: "/new_spec OPP-017", answers: ["Spec title alpha", "v9.9-beta", "Summary gamma", "Scope delta", "Out epsilon", "Constraint eta"], created: "SPEC-042" },
+  { command: "new_work", start: "/new_work SPEC-017", answers: ["Work title theta", "3", "Emmanuel", "Summary iota", "Instructions mu", "Outputs nu"], created: "WP-042" },
+];
 
-  assert.strictEqual(created.length, 1);
-  assert.match(ctx.sent()[7].body.text, /^Created OPP-042\n/);
-  const commands = ctx.logRecords().filter((r) => r.event === "command");
-  assert.deepStrictEqual(commands.map((r) => [r.command, r.result]), Array(8).fill(["new_opportunity", "ok"]));
-  const everything = ctx.logText() + ctx.out.text();
-  for (const secretish of [...answers.filter((a) => a.length > 1), "OPP-042", String(AUTHORIZED_ID)]) {
-    assert.ok(!everything.includes(secretish), `log contains ${secretish}`);
-  }
-});
+for (const run of CREATION_RUNS) {
+  test(`a full /${run.command} run logs only the command name: no answers, no IDs`, async (t) => {
+    const { createRouter } = require("../bot/commands");
+    const parentPageId = fakePageId();
+    const created = [];
+    const router = createRouter({
+      sessions: createSessionStore(),
+      configStatus: { TELEGRAM_BOT_TOKEN: "valid", TELEGRAM_ALLOWED_USER_ID: "valid" },
+      logDir: tempDir(),
+      notion: { findByUretId: async () => ({ result: "found", page: { id: parentPageId }, trashed: false }) },
+      writer: { createRecord: async (type, record) => (created.push(record), { uretId: record.uretId }) },
+      reserveId: async () => run.created,
+    });
+    const texts = [run.start, ...run.answers];
+    const ctx = setup(t, {
+      router,
+      getUpdatesResponses: [ok([]), ok(texts.map((text, i) => message({ updateId: 60 + i, text })))],
+    });
+    const running = ctx.bot.start();
+    await waitFor(() => ctx.sent().length >= texts.length);
+    await ctx.bot.stop();
+    await running;
+
+    assert.strictEqual(created.length, 1);
+    assert.match(ctx.sent()[texts.length - 1].body.text, new RegExp(`^Created ${run.created}\\n`));
+    const commands = ctx.logRecords().filter((r) => r.event === "command");
+    assert.deepStrictEqual(commands.map((r) => [r.command, r.result, r.error_class]), Array(texts.length).fill([run.command, "ok", undefined]));
+    const everything = ctx.logText() + ctx.out.text();
+    const parentId = run.start.split(" ")[1];
+    const secrets = [...run.answers.filter((a) => a.length > 1), run.created, parentPageId, dashedId(parentPageId), String(AUTHORIZED_ID)];
+    if (parentId) secrets.push(parentId);
+    for (const secretish of secrets) {
+      assert.ok(!everything.includes(secretish), `log contains ${secretish}`);
+    }
+  });
+}

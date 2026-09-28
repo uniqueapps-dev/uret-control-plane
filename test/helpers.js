@@ -97,4 +97,78 @@ async function waitFor(predicate, timeoutMs = 2000) {
   }
 }
 
-module.exports = { AUTHORIZED_ID, OTHER_ID, fakeToken, fakeNotionToken, fakePageId, dashedId, tempDir, message, captureStream, fakeTelegramFetch, waitFor };
+// --- Real counter file guard ---------------------------------------------------------
+//
+// Tests must never read or write the repository's uret-id-counters.json (or
+// its lock or temp files). forbidRealCounterFile() makes any fs call on those
+// paths throw in this test process, records it (bot code may catch the error),
+// and after all tests checks that the file is byte-for-byte unchanged, has the
+// same modification time, and has no lock or temp file beside it.
+
+const REAL_COUNTER_FILE = path.join(__dirname, "..", "uret-id-counters.json");
+const GUARDED_FS = [
+  "accessSync", "appendFileSync", "copyFileSync", "existsSync", "lstatSync", "openSync", "readFileSync",
+  "renameSync", "rmSync", "statSync", "unlinkSync", "writeFileSync",
+  "access", "appendFile", "copyFile", "open", "readFile", "rename", "rm", "stat", "unlink", "writeFile",
+];
+const counterGuard = { installed: false, violations: [] };
+
+function isRealCounterPath(p) {
+  if (typeof p !== "string" && !Buffer.isBuffer(p) && !(p instanceof URL)) return false;
+  const abs = path.resolve(p instanceof URL ? p.pathname : String(p));
+  return abs === REAL_COUNTER_FILE || abs.startsWith(`${REAL_COUNTER_FILE}.`);
+}
+
+function counterSnapshot() {
+  const dir = path.dirname(REAL_COUNTER_FILE);
+  const base = path.basename(REAL_COUNTER_FILE);
+  return {
+    content: fs.readFileSync(REAL_COUNTER_FILE, "utf8"),
+    mtimeMs: fs.statSync(REAL_COUNTER_FILE).mtimeMs,
+    siblings: fs.readdirSync(dir).filter((n) => n.startsWith(`${base}.`)),
+  };
+}
+
+function forbidRealCounterFile() {
+  if (counterGuard.installed) return counterGuard;
+  counterGuard.installed = true;
+  const before = counterSnapshot();
+  const originals = {};
+  for (const name of GUARDED_FS) {
+    const original = fs[name];
+    if (typeof original !== "function") continue;
+    originals[name] = original;
+    fs[name] = function guarded(...args) {
+      if (args.slice(0, 2).some(isRealCounterPath)) {
+        counterGuard.violations.push(`fs.${name}`);
+        throw new Error(`test touched the real counter file via fs.${name}`);
+      }
+      return original.apply(this, args);
+    };
+  }
+  require("node:test").after(() => {
+    for (const [name, original] of Object.entries(originals)) fs[name] = original;
+    const after = counterSnapshot();
+    const assert = require("node:assert");
+    assert.deepStrictEqual(counterGuard.violations, [], "a test touched the real counter file");
+    assert.deepStrictEqual(after, before, "the real counter file changed during the tests");
+  });
+  return counterGuard;
+}
+
+module.exports = {
+  AUTHORIZED_ID,
+  OTHER_ID,
+  fakeToken,
+  fakeNotionToken,
+  fakePageId,
+  dashedId,
+  tempDir,
+  message,
+  captureStream,
+  fakeTelegramFetch,
+  waitFor,
+  REAL_COUNTER_FILE,
+  isRealCounterPath,
+  forbidRealCounterFile,
+};
