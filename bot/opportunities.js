@@ -3,7 +3,7 @@
 /**
  * Pure formatting for the read-only commands: URET ID normalisation,
  * deterministic truncation, value formatting, and the fixed /status and
- * /show reply texts (Opportunities, Specs and Work Packages). No network access, no I/O,
+ * /show reply texts (Opportunities, Specs, Work Packages and Evidence). No network access, no I/O,
  * no SDK.
  */
 
@@ -13,11 +13,11 @@ const MIN_WORD_CUT = 200;
 const ELLIPSIS = "…";
 const EMPTY = "—";
 
-const SHOW_USAGE = ["Usage: /show <URET-ID>", "Examples: /show OPP-001, /show SPEC-001, /show WP-001"].join("\n");
-const INVALID_ID_TEXT = "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001";
+const SHOW_USAGE = ["Usage: /show <URET-ID>", "Examples: /show OPP-001, /show SPEC-001, /show WP-001, /show EVD-001"].join("\n");
+const INVALID_ID_TEXT = "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001, /show EVD-001";
 
 // URET ID prefix -> source type key, for the prefixes /show accepts.
-const SHOW_TYPES = { OPP: "opp", SPEC: "spec", WP: "wp" };
+const SHOW_TYPES = { OPP: "opp", SPEC: "spec", WP: "wp", EVD: "evd" };
 
 const STATUS_INTEGRITY_TEXT = ["Notion: Data integrity problem", "Unexpected Opportunity status values found."].join("\n");
 const STATUS_INCOMPLETE_TEXT = [
@@ -42,7 +42,7 @@ function normalizeUretId(input, prefixes = ["OPP"]) {
   return `${prefix}-${digits.padStart(3, "0")}`;
 }
 
-// A /show argument -> { type, uretId } for OPP, SPEC or WP, or null.
+// A /show argument -> { type, uretId } for OPP, SPEC, WP or EVD, or null.
 function parseShowId(input) {
   const uretId = normalizeUretId(input, Object.keys(SHOW_TYPES));
   return uretId ? { type: SHOW_TYPES[uretId.split("-")[0]], uretId } : null;
@@ -165,14 +165,16 @@ function buildRecordReply(uretId, page, fields) {
 
 /**
  * /show for a Spec. `linked` = { uretIds, more }: the Opportunities whose
- * "Specs" relation includes this Spec.
+ * "Specs" relation includes this Spec. `evidence` = { count, incomplete }: the
+ * evidence of its Work Packages.
  */
-function buildSpecShowReply(uretId, page, linked) {
+function buildSpecShowReply(uretId, page, linked, evidence) {
   const p = (page && page.properties) || {};
   return buildRecordReply(uretId, page, [
     ["Version", formatProperty(p.Version)],
     ["Opportunity", linkedText(linked)],
     ["Status", formatProperty(p.Status)],
+    ["Evidence", evidenceText(evidence)],
     ["Summary", formatProperty(p.Summary)],
     ["Scope in", formatProperty(p["Scope in"])],
     ["Scope out", formatProperty(p["Scope out"])],
@@ -182,15 +184,17 @@ function buildSpecShowReply(uretId, page, linked) {
 
 /**
  * /show for a Work Package. `linked` = { uretIds, more }: the Specs whose
- * "Work packages" relation includes this Work Package.
+ * "Work packages" relation includes this Work Package. `evidence` =
+ * { count, incomplete }.
  */
-function buildWorkShowReply(uretId, page, linked) {
+function buildWorkShowReply(uretId, page, linked, evidence) {
   const p = (page && page.properties) || {};
   return buildRecordReply(uretId, page, [
     ["Type", formatProperty(p.Type)],
     ["Worker", formatProperty(p.Worker)],
     ["Spec", linkedText(linked)],
     ["Status", formatProperty(p.Status)],
+    ["Evidence", evidenceText(evidence)],
     ["Summary", formatProperty(p.Summary)],
     ["Instructions", formatProperty(p.Instructions)],
     ["Outputs", formatProperty(p.Outputs)],
@@ -206,6 +210,37 @@ const duplicateText = (id) => ["Notion: Data integrity problem", `Duplicate URET
  *   { outcome: "data_integrity" }  -> fixed integrity text, no counts
  *   { outcome: "incomplete" }      -> fixed incomplete text, no counts
  */
+/**
+ * Splits an Evidence Summary written by /new_evidence:
+ *   <summary>\n\nDetails:\n<details>\n\nNext action:\n<next action>
+ * Text without these labels (written by hand, or the setup script's example)
+ * is all summary, with no details or next action.
+ */
+function parseEvidenceSummary(text) {
+  const value = typeof text === "string" ? text : "";
+  const match = /^([\s\S]*?)\n\nDetails:\n([\s\S]*?)\n\nNext action:\n([\s\S]*)$/.exec(value);
+  if (!match) return { summary: value, details: "", nextAction: "" };
+  return { summary: match[1], details: match[2], nextAction: match[3] };
+}
+
+/**
+ * /show for Evidence. `linked` = { uretIds, more }: the Work Packages whose
+ * "Evidence" relation includes this record.
+ */
+function buildEvidenceShowReply(uretId, page, linked) {
+  const p = (page && page.properties) || {};
+  const summaryProp = p.Summary && p.Summary.type === "rich_text" ? richTextToPlain(p.Summary.rich_text) : "";
+  const parts = parseEvidenceSummary(summaryProp);
+  return buildRecordReply(uretId, page, [
+    ["Type", formatProperty(p.Type)],
+    ["Verdict", formatProperty(p.Verdict)],
+    ["Work package", linkedText(linked)],
+    ["Summary", formatText(parts.summary)],
+    ["Details", formatText(parts.details)],
+    ["Next action", formatText(parts.nextAction)],
+  ]);
+}
+
 // An evidence count: "3", or "1000+" when the count was cut short.
 const evidenceText = (evidence) => `${(evidence && evidence.count) || 0}${evidence && evidence.incomplete ? "+" : ""}`;
 
@@ -249,6 +284,8 @@ module.exports = {
   parseShowId,
   buildSpecShowReply,
   buildWorkShowReply,
+  buildEvidenceShowReply,
+  parseEvidenceSummary,
   truncate,
   richTextToPlain,
   formatText,

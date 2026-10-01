@@ -39,7 +39,7 @@ const text = () => ({ type: "rich_text", rich_text: {} });
  * to its lookup result: a page object ("found"), "duplicate", or
  * { trashed: page }. Anything else is not found.
  */
-function harness({ records = {}, linked = { uretIds: [], more: false }, onFind, onLinked, onCreate, configured = true } = {}) {
+function harness({ records = {}, linked = { uretIds: [], more: false }, evidence = { count: 0, incomplete: false }, onFind, onLinked, onCreate, configured = true } = {}) {
   const clock = { t: 9_000_000 };
   const capture = createCaptureStore({ now: () => clock.t });
   const root = fakePageId();
@@ -91,6 +91,7 @@ function harness({ records = {}, linked = { uretIds: [], more: false }, onFind, 
       if (onLinked) return onLinked();
       return linked;
     },
+    countEvidenceForSpec: async (pageId, opts) => (calls.push({ method: "countEvidenceForSpec", pageId, opts }), evidence),
     getDataSourceId: async () => (calls.push({ method: "getDataSourceId" }), dsId),
   };
   const writer = createNotionWriter({ client, rootPageId: root, resolveDataSource: reader.getDataSourceId });
@@ -107,7 +108,7 @@ function harness({ records = {}, linked = { uretIds: [], more: false }, onFind, 
   const methods = () => calls.map((c) => c.method);
   const count = (method) => calls.filter((c) => c.method === method).length;
   const counter = () => JSON.parse(fs.readFileSync(file, "utf8")).SPEC;
-  return { send, calls, methods, count, counter, capture, clock, dataSource };
+  return { send, calls, methods, count, counter, capture, clock, dataSource, reader };
 }
 
 const oppPage = (extra = {}) => ({ object: "page", id: fakePageId(), in_trash: false, properties: {}, ...extra });
@@ -316,7 +317,7 @@ const specPage = (extra = {}) => ({
 
 test("/show SPEC-001 shows the Spec with its Opportunity by URET ID", async () => {
   const page = specPage();
-  const h = harness({ records: { "SPEC-001": page }, linked: { uretIds: ["OPP-002"], more: false } });
+  const h = harness({ records: { "SPEC-001": page }, linked: { uretIds: ["OPP-002"], more: false }, evidence: { count: 5, incomplete: false } });
   const out = await h.send("/show spec-1");
   assert.strictEqual(out.command, "show");
   assert.strictEqual(
@@ -327,6 +328,7 @@ test("/show SPEC-001 shows the Spec with its Opportunity by URET ID", async () =
       "Version: v0.1",
       "Opportunity: OPP-002",
       "Status: Draft",
+      "Evidence: 5",
       "Summary: A first cut",
       "Scope in: Logging rides",
       "Scope out: —",
@@ -335,8 +337,9 @@ test("/show SPEC-001 shows the Spec with its Opportunity by URET ID", async () =
       "Notion link: https://www.notion.so/Bike-Tracker-Prototype-abc",
     ].join("\n")
   );
-  assert.deepStrictEqual(h.calls.map((c) => [c.method, c.type]), [["findByUretId", "spec"], ["findLinkedUretIds", "opp"]]);
+  assert.deepStrictEqual(h.calls.map((c) => [c.method, c.type]), [["findByUretId", "spec"], ["findLinkedUretIds", "opp"], ["countEvidenceForSpec", undefined]]);
   assert.deepStrictEqual([h.calls[1].relation, h.calls[1].pageId], ["Specs", page.id]);
+  assert.strictEqual(h.calls[2].pageId, page.id);
 });
 
 test("/show SPEC: no linked Opportunity, several, a missing URL, and a trashed Spec", async () => {
@@ -371,8 +374,8 @@ test("/show SPEC: a failing linked lookup gives the fixed Notion text", async ()
 
 test("/show rejects unknown or malformed prefixes without reading Notion", async () => {
   const h = harness();
-  for (const t of ["/show SPC-001", "/show SPEC-0", "/show SPEC-1a", "/show WPX-001", "/show EVD-001", "/show REL-001", "/show SPEC 1"]) {
-    assert.strictEqual((await h.send(t)).reply, "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001", t);
+  for (const t of ["/show SPC-001", "/show SPEC-0", "/show SPEC-1a", "/show WPX-001", "/show EVD-0", "/show REL-001", "/show SPEC 1"]) {
+    assert.strictEqual((await h.send(t)).reply, "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001, /show EVD-001", t);
   }
   assert.strictEqual(h.calls.length, 0);
 });
@@ -384,11 +387,12 @@ test("/show OPP keeps its Phase 2A format and does no linked lookup", async () =
   assert.strictEqual(h.count("findLinkedUretIds"), 0);
 });
 
-test("parseShowId maps OPP, SPEC and WP to their source types", () => {
+test("parseShowId maps OPP, SPEC, WP and EVD to their source types", () => {
   assert.deepStrictEqual(opp.parseShowId(" spec-0042 "), { type: "spec", uretId: "SPEC-042" });
   assert.deepStrictEqual(opp.parseShowId("OPP-1000"), { type: "opp", uretId: "OPP-1000" });
   assert.deepStrictEqual(opp.parseShowId("wp-7"), { type: "wp", uretId: "WP-007" });
-  for (const bad of ["EVD-1", "REL-1", "SPEC-", "SPEC-0", "", undefined, "constructor-1", "__proto__-1"]) assert.strictEqual(opp.parseShowId(bad), null, String(bad));
+  assert.deepStrictEqual(opp.parseShowId("evd-2"), { type: "evd", uretId: "EVD-002" });
+  for (const bad of ["REL-1", "EVD-0", "SPEC-", "SPEC-0", "", undefined, "constructor-1", "__proto__-1"]) assert.strictEqual(opp.parseShowId(bad), null, String(bad));
 });
 
 test("an abort (shutdown) during the parent check is passed on and starts no session", async () => {
@@ -399,4 +403,13 @@ test("an abort (shutdown) during the parent check is passed on and starts no ses
   });
   await assert.rejects(h.send("/new_spec OPP-002"), (err) => err.label === "notion_aborted");
   assert.strictEqual(h.capture.size(), 0);
+});
+
+test("/show SPEC: a failing evidence count gives the Notion text, never a made-up zero", async () => {
+  const h = harness({ records: { "SPEC-001": specPage() } });
+  h.reader.countEvidenceForSpec = async () => {
+    throw Object.assign(new Error("x"), { label: "notion_timeout" });
+  };
+  const out = await h.send("/show SPEC-001");
+  assert.deepStrictEqual([out.reply, out.label], ["Notion: Unavailable", "notion_timeout"]);
 });

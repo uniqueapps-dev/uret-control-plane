@@ -37,7 +37,7 @@ const select = (names) => ({ type: "select", select: { options: names.map((name)
  * Router wired like index.js with a fake read adapter. `records` maps a URET ID
  * to a page ("found"), "duplicate", or { trashed: page }; others are not found.
  */
-function harness({ records = {}, linked = { uretIds: [], more: false }, onFind, onLinked, configured = true } = {}) {
+function harness({ records = {}, linked = { uretIds: [], more: false }, evidence = { count: 0, incomplete: false }, onFind, onLinked, configured = true } = {}) {
   const clock = { t: 7_000_000 };
   const capture = createCaptureStore({ now: () => clock.t });
   const root = fakePageId();
@@ -82,6 +82,7 @@ function harness({ records = {}, linked = { uretIds: [], more: false }, onFind, 
       if (onLinked) return onLinked();
       return linked;
     },
+    countEvidenceForWP: async (pageId) => (calls.push({ method: "countEvidenceForWP", pageId }), evidence),
     getDataSourceId: async () => (calls.push({ method: "getDataSourceId" }), fakePageId()),
   };
   const writer = createNotionWriter({ client, rootPageId: root, resolveDataSource: reader.getDataSourceId });
@@ -99,7 +100,7 @@ function harness({ records = {}, linked = { uretIds: [], more: false }, onFind, 
   const count = (method) => calls.filter((c) => c.method === method).length;
   const counter = () => JSON.parse(fs.readFileSync(file, "utf8")).WP;
   const created = () => calls.find((c) => c.method === "pages.create").args.properties;
-  return { send, calls, methods, count, counter, capture, clock, created };
+  return { send, calls, methods, count, counter, capture, clock, created, reader };
 }
 
 const specPage = (extra = {}) => ({ object: "page", id: fakePageId(), in_trash: false, properties: {}, ...extra });
@@ -282,7 +283,7 @@ const wpPage = (extra = {}) => ({
 
 test("/show WP-001 shows the Work Package with its Spec by URET ID", async () => {
   const page = wpPage();
-  const h = harness({ records: { "WP-001": page }, linked: { uretIds: ["SPEC-001"], more: false } });
+  const h = harness({ records: { "WP-001": page }, linked: { uretIds: ["SPEC-001"], more: false }, evidence: { count: 2, incomplete: false } });
   const out = await h.send("/show wp-1");
   assert.strictEqual(out.command, "show");
   assert.strictEqual(
@@ -294,6 +295,7 @@ test("/show WP-001 shows the Work Package with its Spec by URET ID", async () =>
       "Worker: Claude Code",
       "Spec: SPEC-001",
       "Status: Draft",
+      "Evidence: 2",
       "Summary: Make it robust",
       "Instructions: Add tests",
       "Outputs: —",
@@ -301,8 +303,9 @@ test("/show WP-001 shows the Work Package with its Spec by URET ID", async () =>
       "Notion link: https://www.notion.so/Harden-Bike-Tracker-abc",
     ].join("\n")
   );
-  assert.deepStrictEqual(h.calls.map((c) => [c.method, c.type]), [["findByUretId", "wp"], ["findLinkedUretIds", "spec"]]);
+  assert.deepStrictEqual(h.calls.map((c) => [c.method, c.type]), [["findByUretId", "wp"], ["findLinkedUretIds", "spec"], ["countEvidenceForWP", undefined]]);
   assert.deepStrictEqual([h.calls[1].relation, h.calls[1].pageId], ["Work packages", page.id]);
+  assert.strictEqual(h.calls[2].pageId, page.id);
 });
 
 test("/show WP: no Spec linked, a missing URL, and a trashed record", async () => {
@@ -331,7 +334,16 @@ test("/show WP-999 not found; duplicate reported; a failing Spec lookup gives th
 test("/show rejects invalid WP IDs without reading Notion", async () => {
   const h = harness();
   for (const t of ["/show WP-0", "/show WP-", "/show WPP-001", "/show W-001", "/show WP-1b", "/show WP 1"]) {
-    assert.strictEqual((await h.send(t)).reply, "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001", t);
+    assert.strictEqual((await h.send(t)).reply, "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001, /show EVD-001", t);
   }
   assert.strictEqual(h.calls.length, 0);
+});
+
+test("/show WP: a failing evidence count gives the Notion text, never a made-up zero", async () => {
+  const h = harness({ records: { "WP-001": wpPage() } });
+  h.reader.countEvidenceForWP = async () => {
+    throw Object.assign(new Error("x"), { label: "notion_schema_invalid" });
+  };
+  const out = await h.send("/show WP-001");
+  assert.deepStrictEqual([out.reply, out.label], ["Notion: Schema problem", "notion_schema_invalid"]);
 });

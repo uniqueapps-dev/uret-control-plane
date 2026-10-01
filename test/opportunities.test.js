@@ -54,8 +54,8 @@ test("invalid URET IDs are rejected", () => {
 });
 
 test("usage and invalid-ID texts are exact", () => {
-  assert.strictEqual(opp.SHOW_USAGE, "Usage: /show <URET-ID>\nExamples: /show OPP-001, /show SPEC-001, /show WP-001");
-  assert.strictEqual(opp.INVALID_ID_TEXT, "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001");
+  assert.strictEqual(opp.SHOW_USAGE, "Usage: /show <URET-ID>\nExamples: /show OPP-001, /show SPEC-001, /show WP-001, /show EVD-001");
+  assert.strictEqual(opp.INVALID_ID_TEXT, "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001, /show EVD-001");
   assert.strictEqual(opp.notFoundText("OPP-001"), "Not found: OPP-001");
   assert.strictEqual(opp.duplicateText("OPP-001"), "Notion: Data integrity problem\nDuplicate URET ID: OPP-001");
 });
@@ -247,4 +247,79 @@ test("/status integrity and incomplete replies are exact and show no counts", ()
 
 test("required statuses are exactly Idea, Active, Parked, Done", () => {
   assert.deepStrictEqual(opp.REQUIRED_STATUSES, ["Idea", "Active", "Parked", "Done"]);
+});
+
+// --- Phase 4 step 6: evidence in /show --------------------------------------------------------
+
+const rtp = (text) => [{ type: "text", plain_text: text }];
+
+test("parseEvidenceSummary splits the labelled sections written by /new_evidence", () => {
+  assert.deepStrictEqual(opp.parseEvidenceSummary("Works.\n\nDetails:\nLine one\nLine two\n\nNext action:\nShip it."), {
+    summary: "Works.",
+    details: "Line one\nLine two",
+    nextAction: "Ship it.",
+  });
+  // A summary or details that contain blank lines still split at the labels.
+  assert.deepStrictEqual(opp.parseEvidenceSummary("A\n\nB\n\nDetails:\nC\n\nD\n\nNext action:\nE\n\nF"), { summary: "A\n\nB", details: "C\n\nD", nextAction: "E\n\nF" });
+});
+
+test("parseEvidenceSummary: text without the labels is all summary", () => {
+  for (const text of ["Setup script created the databases.", "Details: inline\nNext action: inline", "A\n\nDetails:\nB only", ""]) {
+    assert.deepStrictEqual(opp.parseEvidenceSummary(text), { summary: text, details: "", nextAction: "" }, JSON.stringify(text));
+  }
+  assert.deepStrictEqual(opp.parseEvidenceSummary(undefined), { summary: "", details: "", nextAction: "" });
+});
+
+test("buildEvidenceShowReply: the locked format", () => {
+  const page = {
+    url: "https://www.notion.so/EVD-001-abc",
+    properties: {
+      Name: { type: "title", title: rtp("Bike Tracker prototype test results") },
+      Type: { type: "select", select: { name: "Test results" } },
+      Verdict: { type: "select", select: { name: "Pass" } },
+      Summary: {
+        type: "rich_text",
+        rich_text: rtp("Prototype works on LG G8X. Expense logging is clear.\n\nDetails:\nNext oil-change date needs to be more visible on home screen.\n\nNext action:\nAdd service card to dashboard."),
+      },
+    },
+  };
+  assert.strictEqual(
+    opp.buildEvidenceShowReply("EVD-001", page, { uretIds: ["WP-002"], more: false }),
+    [
+      "EVD-001 — Bike Tracker prototype test results",
+      "",
+      "Type: Test results",
+      "Verdict: Pass",
+      "Work package: WP-002",
+      "Summary: Prototype works on LG G8X. Expense logging is clear.",
+      "Details: Next oil-change date needs to be more visible on home screen.",
+      "Next action: Add service card to dashboard.",
+      "",
+      "Notion link: https://www.notion.so/EVD-001-abc",
+    ].join("\n")
+  );
+});
+
+test("buildEvidenceShowReply: unlabelled Summary, empty fields, no link, trashed, long details", () => {
+  const plainPage = { properties: { Summary: { type: "rich_text", rich_text: rtp("Setup script example.") } }, in_trash: true };
+  const reply = opp.buildEvidenceShowReply("EVD-001", plainPage, { uretIds: [], more: false });
+  assert.strictEqual(
+    reply,
+    ["Archived/trashed record", "EVD-001 — —", "", "Type: —", "Verdict: —", "Work package: —", "Summary: Setup script example.", "Details: —", "Next action: —", "", "Notion link: unavailable"].join("\n")
+  );
+  const long = { properties: { Summary: { type: "rich_text", rich_text: rtp(`S\n\nDetails:\n${"d".repeat(400)}\n\nNext action:\nN`) } } };
+  const detailsLine = opp.buildEvidenceShowReply("EVD-003", long, null).split("\n").find((l) => l.startsWith("Details: "));
+  assert.strictEqual(Array.from(detailsLine.slice("Details: ".length)).length, 300, "long details are cut like other fields");
+});
+
+test("Spec and Work Package /show carry the evidence count after Status, '+' when cut short", () => {
+  const page = { properties: { Status: { type: "select", select: { name: "Draft" } } } };
+  const spec = opp.buildSpecShowReply("SPEC-002", page, null, { count: 5, incomplete: false }).split("\n");
+  assert.deepStrictEqual(spec.slice(spec.indexOf("Status: Draft"), spec.indexOf("Status: Draft") + 2), ["Status: Draft", "Evidence: 5"]);
+  const wp = opp.buildWorkShowReply("WP-002", page, null, { count: 25, incomplete: true }).split("\n");
+  assert.deepStrictEqual(wp.slice(wp.indexOf("Status: Draft"), wp.indexOf("Status: Draft") + 2), ["Status: Draft", "Evidence: 25+"]);
+});
+
+test("parseEvidenceSummary splits at the first labels, so details may contain a 'Details:' line", () => {
+  assert.deepStrictEqual(opp.parseEvidenceSummary("S\n\nDetails:\na\n\nDetails:\nb\n\nNext action:\nN"), { summary: "S", details: "a\n\nDetails:\nb", nextAction: "N" });
 });

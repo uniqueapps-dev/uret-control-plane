@@ -20,9 +20,9 @@ const { tempDir, tempCounterFile, fakePageId, dashedId, AUTHORIZED_ID, forbidRea
 forbidRealCounterFile();
 
 const USER = AUTHORIZED_ID;
-const TITLES = { opp: "URET – Opportunities", spec: "URET – Specs", wp: "URET – Work Packages" };
+const TITLES = { opp: "URET – Opportunities", spec: "URET – Specs", wp: "URET – Work Packages", evd: "URET – Evidence" };
 // Reverse side of each two-way relation: source type -> property -> [child type, child property].
-const REVERSE = { opp: { Specs: ["spec", "Opportunity"] }, spec: { "Work packages": ["wp", "Spec"] } };
+const REVERSE = { opp: { Specs: ["spec", "Opportunity"] }, spec: { "Work packages": ["wp", "Spec"] }, wp: { Evidence: ["evd", "Work package"] } };
 
 const text = () => ({ type: "rich_text", rich_text: {} });
 const select = (names) => ({ type: "select", select: { options: names.map((name) => ({ name })) } });
@@ -40,6 +40,9 @@ function schema(type) {
       "Success metrics": text(),
       "Next action": text(),
     };
+  }
+  if (type === "evd") {
+    return { ...common, "Work package": { type: "relation", relation: {} }, Type: select(flows.EVIDENCE_TYPES), Summary: text(), Verdict: select(flows.VERDICTS) };
   }
   if (type === "spec") {
     return { ...common, Status: select(["Draft"]), Opportunity: { type: "relation", relation: {} }, Version: text(), Summary: text(), "Scope in": text(), "Scope out": text(), Constraints: text() };
@@ -72,11 +75,11 @@ function readShape(properties) {
 
 function workspace({ counters = { OPP: 1, SPEC: 0, WP: 0, EVD: 0, REL: 0 }, existing = [] } = {}) {
   const root = fakePageId();
-  const dsIds = { opp: fakePageId(), spec: fakePageId(), wp: fakePageId() };
+  const dsIds = { opp: fakePageId(), spec: fakePageId(), wp: fakePageId(), evd: fakePageId() };
   const typeOfDs = Object.fromEntries(Object.entries(dsIds).map(([t, id]) => [id, t]));
   const pages = []; // { type, uretId, page }
   for (const uretId of existing) {
-    const type = { OPP: "opp", SPEC: "spec", WP: "wp" }[uretId.split("-")[0]];
+    const type = { OPP: "opp", SPEC: "spec", WP: "wp", EVD: "evd" }[uretId.split("-")[0]];
     pages.push({ type, uretId, page: { object: "page", id: fakePageId(), in_trash: false, properties: readShape({ "URET ID": { rich_text: [{ text: { content: uretId } }] } }) } });
   }
   const file = tempCounterFile(counters);
@@ -113,6 +116,16 @@ function workspace({ counters = { OPP: 1, SPEC: 0, WP: 0, EVD: 0, REL: 0 }, exis
       const linkedIds = child && child.page.properties[childProp] ? child.page.properties[childProp].relation.map((r) => r.id) : [];
       const uretIds = pages.filter((p) => p.type === type && linkedIds.includes(p.page.id)).map((p) => p.uretId);
       return { uretIds, more: false };
+    },
+    // Evidence counts from the stored pages (Evidence links to Work Packages).
+    countEvidenceForWP: async (wpPageId) => {
+      const linkedTo = (p, prop, id) => ((p.page.properties[prop] || {}).relation || []).some((r) => r.id === id);
+      return { count: pages.filter((p) => p.type === "evd" && linkedTo(p, "Work package", wpPageId)).length, incomplete: false };
+    },
+    countEvidenceForSpec: async (specPageId) => {
+      const linkedTo = (p, prop, id) => ((p.page.properties[prop] || {}).relation || []).some((r) => r.id === id);
+      const wps = pages.filter((p) => p.type === "wp" && linkedTo(p, "Spec", specPageId)).map((p) => p.page.id);
+      return { count: pages.filter((p) => p.type === "evd" && wps.some((id) => linkedTo(p, "Work package", id))).length, incomplete: false };
     },
     getDataSourceId: async (type) => dsIds[type],
   };
@@ -191,4 +204,38 @@ test("a Spec cannot be created for an Opportunity that does not exist yet; the n
   assert.strictEqual((await ws.send("/new_spec OPP-002")).reply, "Opportunity OPP-002 not found.");
   await run(ws, "/new_opportunity", OPP("Now it exists"));
   assert.match(await run(ws, "/new_spec OPP-002", SPEC("Linked")), /^Created SPEC-001\n/);
+});
+
+// --- Phase 4: Evidence round trip -------------------------------------------------------------
+
+const EVIDENCE = (summary) => ["2", summary, "1", "Expense logging is clear.\nTested on two rides.", "Add service card to dashboard."];
+
+test("Evidence round trip: /new_evidence, then /show EVD reads the sections back and the counts rise", async () => {
+  const ws = workspace({ counters: { OPP: 1, SPEC: 0, WP: 0, EVD: 0, REL: 0 } });
+  await run(ws, "/new_opportunity", OPP("Bike tracker"));
+  await run(ws, "/new_spec OPP-002", SPEC("Bike spec"));
+  await run(ws, "/new_work SPEC-001", WORK("Bike work"));
+  assert.match((await ws.send("/show WP-001")).reply, /\nStatus: Draft\nEvidence: 0\n/);
+
+  assert.match(await run(ws, "/new_evidence WP-001", EVIDENCE("Prototype works on LG G8X.")), /^Created EVD-001\n\nType: Test results\nVerdict: Pass\nWork package: WP-001\n/);
+  assert.match(await run(ws, "/new_evidence wp-1", EVIDENCE("Second test.")), /^Created EVD-002\n/);
+
+  assert.strictEqual(
+    (await ws.send("/show EVD-001")).reply,
+    [
+      "EVD-001 — Prototype works on LG G8X.",
+      "",
+      "Type: Test results",
+      "Verdict: Pass",
+      "Work package: WP-001",
+      "Summary: Prototype works on LG G8X.",
+      "Details: Expense logging is clear.\nTested on two rides.",
+      "Next action: Add service card to dashboard.",
+      "",
+      "Notion link: https://www.notion.so/EVD-001",
+    ].join("\n")
+  );
+  assert.match((await ws.send("/show WP-001")).reply, /\nStatus: Draft\nEvidence: 2\n/);
+  assert.match((await ws.send("/show SPEC-001")).reply, /\nStatus: Draft\nEvidence: 2\n/);
+  assert.deepStrictEqual(ws.counters(), { OPP: 2, SPEC: 1, WP: 1, EVD: 2, REL: 0 });
 });

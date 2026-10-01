@@ -39,7 +39,7 @@ const select = (names) => ({ type: "select", select: { options: names.map((name)
  * to a page ("found"), "duplicate", or { trashed: page }; others are not found.
  * The counter file starts as committed after the Phase 3-5 live run.
  */
-function harness({ records = {}, onFind, onCreate, configured = true, counters = { OPP: 2, SPEC: 2, WP: 2, EVD: 0, REL: 0 } } = {}) {
+function harness({ records = {}, onFind, onCreate, linked = { uretIds: [], more: false }, onLinked, configured = true, counters = { OPP: 2, SPEC: 2, WP: 2, EVD: 0, REL: 0 } } = {}) {
   const clock = { t: 3_000_000 };
   const capture = createCaptureStore({ now: () => clock.t });
   const root = fakePageId();
@@ -84,6 +84,11 @@ function harness({ records = {}, onFind, onCreate, configured = true, counters =
       if (r && r.trashed) return { result: "found", page: r.trashed, trashed: true };
       if (r) return { result: "found", page: r, trashed: false };
       return { result: "not_found", page: null, trashed: false };
+    },
+    findLinkedUretIds: async (type, relation, pageId, opts) => {
+      calls.push({ method: "findLinkedUretIds", type, relation, pageId, opts });
+      if (onLinked) return onLinked();
+      return linked;
     },
     getDataSourceId: async (type) => (calls.push({ method: "getDataSourceId", type }), fakePageId()),
   };
@@ -395,4 +400,77 @@ test("answers never reach the logged fields (command and label)", async () => {
     seen.push(out.command, out.label);
   }
   assert.deepStrictEqual([...new Set(seen.filter(Boolean))], ["new_evidence"]);
+});
+
+// --- Phase 4 step 6: /show EVD ---------------------------------------------------------------------
+
+const evdPage = (summary, extra = {}) => ({
+  object: "page",
+  id: fakePageId(),
+  in_trash: false,
+  url: "https://www.notion.so/EVD-002-abc",
+  properties: {
+    "URET ID": { type: "rich_text", rich_text: rt("EVD-002") },
+    Name: { type: "title", title: rt("Prototype works on LG G8X. Expense logging is clear.") },
+    Type: { type: "select", select: { name: "Test results" } },
+    Verdict: { type: "select", select: { name: "Pass" } },
+    Summary: { type: "rich_text", rich_text: rt(summary) },
+  },
+  ...extra,
+});
+const LABELLED = "Prototype works on LG G8X. Expense logging is clear.\n\nDetails:\nNext oil-change date needs to be more visible on home screen.\n\nNext action:\nAdd service card to dashboard.";
+
+test("/show EVD-002 shows the Evidence with its Work package and the Summary sections", async () => {
+  const page = evdPage(LABELLED);
+  const h = harness({ records: { "EVD-002": page }, linked: { uretIds: ["WP-002"], more: false } });
+  const out = await h.send("/show evd-2");
+  assert.strictEqual(out.command, "show");
+  assert.strictEqual(
+    out.reply,
+    [
+      "EVD-002 — Prototype works on LG G8X. Expense logging is clear.",
+      "",
+      "Type: Test results",
+      "Verdict: Pass",
+      "Work package: WP-002",
+      "Summary: Prototype works on LG G8X. Expense logging is clear.",
+      "Details: Next oil-change date needs to be more visible on home screen.",
+      "Next action: Add service card to dashboard.",
+      "",
+      "Notion link: https://www.notion.so/EVD-002-abc",
+    ].join("\n")
+  );
+  assert.deepStrictEqual(h.calls.map((c) => [c.method, c.type, c.relation]), [["findByUretId", "evd", undefined], ["findLinkedUretIds", "wp", "Evidence"]]);
+  assert.strictEqual(h.calls[1].pageId, page.id);
+});
+
+test("/show EVD: an unlabelled Summary (the setup script's EVD-001) is all summary", async () => {
+  const page = evdPage("Setup script created the databases, relations and this example chain.");
+  const h = harness({ records: { "EVD-001": page }, linked: { uretIds: ["WP-001"], more: false } });
+  const reply = (await h.send("/show EVD-001")).reply;
+  assert.match(reply, /\nSummary: Setup script created the databases, relations and this example chain\.\nDetails: —\nNext action: —\n/);
+});
+
+test("/show EVD: no link, no Work package, trashed record", async () => {
+  const h = harness({ records: { "EVD-002": evdPage(LABELLED, { url: undefined }) } });
+  const reply = (await h.send("/show EVD-002")).reply;
+  assert.match(reply, /\nWork package: —\n/);
+  assert.match(reply, /\nNotion link: unavailable$/);
+  const trashed = harness({ records: { "EVD-002": { trashed: evdPage(LABELLED, { in_trash: true }) } } });
+  assert.match((await trashed.send("/show EVD-002")).reply, /^Archived\/trashed record\nEVD-002 — /);
+});
+
+test("/show EVD-999 not found, duplicates reported, and a failing Work package lookup gives the Notion text", async () => {
+  const h = harness({ records: { "EVD-003": "duplicate" } });
+  assert.strictEqual((await h.send("/show EVD-999")).reply, "Not found: EVD-999");
+  assert.strictEqual((await h.send("/show EVD-003")).label, "notion_duplicate_id");
+  assert.strictEqual(h.count("findLinkedUretIds"), 0);
+  const failing = harness({
+    records: { "EVD-002": evdPage(LABELLED) },
+    onLinked: () => {
+      throw Object.assign(new Error("x"), { label: "notion_timeout" });
+    },
+  });
+  const out = await failing.send("/show EVD-002");
+  assert.deepStrictEqual([out.reply, out.label], ["Notion: Unavailable", "notion_timeout"]);
 });

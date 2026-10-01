@@ -236,7 +236,7 @@ test("/show with no argument returns the exact usage text and reads nothing", as
   const { router } = setup({ notion });
   for (const text of ["/show", "/show   ", "/show@UretBot"]) {
     const out = await router.route({ text, chatId: 1 });
-    assert.strictEqual(out.reply, "Usage: /show <URET-ID>\nExamples: /show OPP-001, /show SPEC-001, /show WP-001");
+    assert.strictEqual(out.reply, "Usage: /show <URET-ID>\nExamples: /show OPP-001, /show SPEC-001, /show WP-001, /show EVD-001");
   }
   assert.strictEqual(notion.calls.length, 0);
 });
@@ -244,9 +244,9 @@ test("/show with no argument returns the exact usage text and reads nothing", as
 test("/show rejects malformed IDs without reading Notion", async () => {
   const notion = fakeNotion();
   const { router } = setup({ notion });
-  for (const text of ["/show OPP-0", "/show SPEC-0", "/show SPC-1", "/show WP-0", "/show EVD-1", "/show REL-1", "/show pharmacy", "/show OPP-1 extra", "/show OPP1"]) {
+  for (const text of ["/show OPP-0", "/show SPEC-0", "/show SPC-1", "/show WP-0", "/show EVD-0", "/show REL-1", "/show pharmacy", "/show OPP-1 extra", "/show OPP1"]) {
     const out = await router.route({ text, chatId: 1 });
-    assert.strictEqual(out.reply, "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001", text);
+    assert.strictEqual(out.reply, "Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001, /show EVD-001", text);
   }
   assert.strictEqual(notion.calls.length, 0);
 });

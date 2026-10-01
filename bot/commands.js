@@ -24,7 +24,7 @@ const COMMAND_LIST = [
   "/help - list commands",
   "/cancel - cancel the current interaction",
   "/status - Opportunity counts and active work (read-only)",
-  "/show <URET-ID> - one Opportunity, Spec or Work Package (read-only)",
+  "/show <URET-ID> - one Opportunity, Spec, Work Package or Evidence (read-only)",
   "/health - health check",
   "/new_opportunity - create an Opportunity (guided)",
   "/new_spec <OPP-ID> - create a Spec for an Opportunity (guided)",
@@ -153,13 +153,22 @@ function createRouter({ sessions, configStatus, logDir, notion = null, writer = 
       if (found.result === "not_found") return { reply: opp.notFoundText(uretId) };
       if (found.result === "duplicate") return { reply: opp.duplicateText(uretId), label: "notion_duplicate_id" };
       if (type === "opp") return { reply: opp.buildShowReply(found.page) };
-      // A Spec shows its Opportunity, a Work Package its Spec, by URET ID,
-      // found through the reverse side of the two-way relation.
-      const [parentType, relation, build] =
-        type === "spec" ? ["opp", "Specs", opp.buildSpecShowReply] : ["spec", "Work packages", opp.buildWorkShowReply];
+      // A Spec shows its Opportunity, a Work Package its Spec, Evidence its Work
+      // Package, by URET ID, found through the reverse side of the two-way
+      // relation. Specs and Work Packages also show their evidence count.
+      const [parentType, relation, build] = {
+        spec: ["opp", "Specs", opp.buildSpecShowReply],
+        wp: ["spec", "Work packages", opp.buildWorkShowReply],
+        evd: ["wp", "Evidence", opp.buildEvidenceShowReply],
+      }[type];
       const linked = await read(() => notion.findLinkedUretIds(parentType, relation, found.page.id, { signal }));
       if (linked.reply) return linked;
-      return { reply: build(uretId, found.page, linked.value) };
+      if (type === "evd") return { reply: build(uretId, found.page, linked.value) };
+      const evidence = await read(() =>
+        type === "spec" ? notion.countEvidenceForSpec(found.page.id, { signal }) : notion.countEvidenceForWP(found.page.id, { signal })
+      );
+      if (evidence.reply) return evidence;
+      return { reply: build(uretId, found.page, linked.value, evidence.value) };
     },
     health: async ({ signal }) => {
       const { text, label } = await buildHealthReport({
