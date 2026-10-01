@@ -269,7 +269,7 @@ test("a Status option missing in Notion stops the update with the schema text", 
   h.dataSources.wp.properties.Status = select(["Draft", "Done", "Blocked"]);
   h.records["WP-002"] = h.page("wp", "Draft");
   const out = await h.send("/update_status WP-002 In progress");
-  assert.deepStrictEqual([out.reply, out.label], ["Notion schema problem. Cannot create record.", "notion_schema_invalid"]);
+  assert.deepStrictEqual([out.reply, out.label], ["Notion schema problem. Cannot update record.", "notion_schema_invalid"]);
   assert.strictEqual(h.count("pages.update"), 0);
 });
 

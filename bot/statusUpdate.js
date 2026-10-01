@@ -34,6 +34,8 @@ const trashedText = (type, id) => `${TYPE_LABEL[type]} ${id} is in the trash.`;
 const alreadyText = (id, status) => `${id} is already ${status}.`;
 const updatedText = (id, status) => `Updated ${id} status to ${status}.`;
 const unconfirmedText = (id) => `Notion did not confirm the update. Check with /show ${id}.`;
+// The creation texts, except that a schema problem names the update.
+const UPDATE_ERROR_TEXT = { ...CREATE_ERROR_TEXT, notion_schema_invalid: "Notion schema problem. Cannot update record." };
 
 /**
  * Splits "<id> <status words>" and validates both, without any Notion call.
@@ -81,8 +83,8 @@ function createStatusUpdater({ reader, writer }) {
       const label = err && typeof err.label === "string" ? err.label : null;
       if (!label || label === "notion_aborted") throw err;
       if (err.uncertain === true) return { reply: unconfirmedText(uretId), label: "notion_update_unconfirmed" };
-      const mapped = CREATE_ERROR_TEXT[label] ? label : READ_LABELS[label] || "notion_unavailable";
-      return { reply: CREATE_ERROR_TEXT[mapped], label: mapped };
+      const mapped = UPDATE_ERROR_TEXT[label] ? label : READ_LABELS[label] || "notion_unavailable";
+      return { reply: UPDATE_ERROR_TEXT[mapped], label: mapped };
     }
     return { reply: updatedText(uretId, status) };
   }
