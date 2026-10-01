@@ -5,84 +5,124 @@ Tooling for URET, a phone-first control plane for AI-assisted work.
 | Part | Path | Purpose |
 |---|---|---|
 | Notion setup script | `create-uret-databases.js` | One-off setup/repair of the five URET Notion databases. Frozen; not used by the bot. |
-| URET Control Bot | `bot/` | Telegram bot run from Termux with long polling. With Notion configured it reads URET records and **creates** new Opportunities, Specs and Work Packages through guided questions. It never changes or deletes existing records. |
+| URET Control Bot | `bot/` | Telegram bot run from Termux with long polling. With Notion configured it reads URET records, **creates** Opportunities, Specs, Work Packages and Evidence through guided questions, and **changes the Status** of existing Opportunities, Specs and Work Packages. It never deletes records or changes any other field. |
 
 ## URET Control Bot MVP v0.1
 
-A small, deterministic Telegram bot. When Notion is configured it can read the
-URET records under URET Root and **create** new Opportunities, Specs and Work
-Packages through guided questions. It **never changes or deletes existing
-records**: its only write is Notion's "create page". Without Notion it runs
-exactly as in Phase 1.
+## 1. Overview
 
-### Commands
+A small, deterministic Telegram bot for working with the URET records in
+Notion from a phone. It can:
+
+- **create** Opportunities, Specs, Work Packages and Evidence, by asking one
+  question at a time;
+- **change the Status** of an Opportunity, Spec or Work Package, and nothing
+  else;
+- **show** any of those records, Opportunity counts, and the active work with
+  its evidence.
+
+It never deletes a record, never changes any field other than Status, and never
+uses AI or language models. Without Notion configured it still answers
+`/start`, `/help`, `/cancel` and `/health`.
+
+**Architecture.** Telegram long polling (`bot/telegram.js`) → authorization
+(`bot/auth.js`: one numeric user ID, private chats only) → command router
+(`bot/commands.js`). Notion is reached only through two adapters:
+
+| Adapter | Calls | Used for |
+|---|---|---|
+| `bot/notion.js` (read) | `blocks.children.list`, `databases.retrieve`, `dataSources.retrieve`, `dataSources.query` | finding the databases, checking schemas, lookups, counts |
+| `bot/notionWrite.js` (write) | `dataSources.retrieve`, `pages.create`, `pages.update` (Status only) | creating records, changing Status |
+
+Guided sessions live in memory (`bot/captureSession.js`); new URET IDs come
+from `uret-id-counters.json` with a Notion check (`bot/idCounter.js`). Logs
+record only the command name, the result and fixed labels.
+
+## 2. Commands
 
 | Command | What it does |
 |---|---|
 | `/start` | Introduction and the list of commands |
 | `/help` | The list of commands |
 | `/cancel` | Ends the current guided session. Nothing is created. |
-| `/status` | Opportunity counts by status, read from Notion |
-| `/show <URET-ID>` | One Opportunity, Spec or Work Package by its URET ID |
+| `/status` | Opportunity counts by status, then the active work with its evidence |
+| `/show <URET-ID>` | One Opportunity, Spec, Work Package or Evidence record |
 | `/health` | Local checks plus read-only Notion checks |
 | `/new_opportunity` | Create an Opportunity (7 guided questions) |
 | `/new_spec <OPP-ID>` | Create a Spec for an Opportunity (6 guided questions) |
 | `/new_work <SPEC-ID>` | Create a Work Package for a Spec (6 guided questions) |
+| `/new_evidence <WP-ID>` | Record Evidence for a Work Package (5 guided questions) |
+| `/update_status <URET-ID> <status>` | Change the Status of an Opportunity, Spec or Work Package |
 
-`/start` and `/help` list these nine commands. `/start` also says:
+`/start` ends with:
 
 ```
-It can create new Opportunities, Specs and Work Packages through guided questions.
-It never changes or deletes existing URET records.
+It can create new Opportunities, Specs, Work Packages and Evidence through guided questions.
+It can change the Status of existing Opportunities, Specs and Work Packages.
+It never deletes records or changes any other field.
 ```
 
-Any other message gets a pointer to `/help`, unless a guided session is open
-(then it is taken as the answer to the current question).
+Any other message gets `Unknown command. Use /help to see the available
+commands.`, unless a guided session is open: then it is the answer to the
+current question.
 
-**`/status`** replies with one of:
+**IDs** are normalised everywhere: `opp-1`, `OPP-1`, `opp-001` and `OPP-001` all
+mean `OPP-001`, and the same goes for `SPEC`, `WP` and `EVD`.
+
+### `/status`
 
 ```
 Notion: Connected
-Total: 7
-Idea: 3
-Active: 2
-Parked: 1
-Done: 1
+Total: 12
+Idea: 4
+Active: 3
+Parked: 2
+Done: 3
+
+Active work:
+• WP-002 — Harden Bike Tracker prototype
+  Spec: SPEC-002
+  Evidence: 1
+• WP-003 — PBSRx offline mode
+  Spec: SPEC-003
+  Evidence: 0
 ```
 
-- `Notion: Data integrity problem` / `Unexpected Opportunity status values found.`
-  when any non-trashed Opportunity has a status other than Idea, Active, Parked
-  or Done, or no status. No counts are shown; nothing is repaired.
-- `Notion: Connected` / `Counts: Incomplete` / `At least 1,000 records were scanned.` /
-  `Use Notion directly for the full dataset.` when there are more than 1,000
-  records. No partial counts are shown.
+- **Counts.** Instead of the counts, the first part can be
+  `Notion: Data integrity problem` / `Unexpected Opportunity status values found.`
+  (a non-trashed Opportunity has no status, or one other than Idea, Active,
+  Parked or Done; nothing is repaired), or `Notion: Connected` /
+  `Counts: Incomplete` / `At least 1,000 records were scanned.` /
+  `Use Notion directly for the full dataset.` (more than 1,000 records).
+- **Active work** follows in every case: the Work Packages whose Status is
+  "In progress" or "Draft", most recently edited first, at most 5. Each shows
+  its Spec (by URET ID) and its evidence count; a count cut short shows `+`
+  (for example `Evidence: 1000+`). With none: `Active work: None`. With more
+  than 5: a last line `More active work in Notion.`
+- **Failures.** If the counts cannot be read, the reply is only the Notion text
+  (see [Error messages](#4-error-messages)). If only the active work cannot be
+  read, the counts stand and the section is `Active work: unavailable`.
 
-**`/show <URET-ID>`** accepts `OPP-…`, `SPEC-…` and `WP-…` IDs:
+### `/show <URET-ID>`
 
-```
-/show OPP-002
-/show SPEC-001
-/show WP-001
-```
+Accepts `OPP-…`, `SPEC-…`, `WP-…` and `EVD-…`. `/show` alone replies
+`Usage: /show <URET-ID>` / `Examples: /show OPP-001, /show SPEC-001, /show WP-001, /show EVD-001`;
+anything else gets
+`Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001, /show EVD-001`
+and nothing is read.
 
-- IDs are normalised: `opp-1`, `OPP-1`, `opp-001` and `OPP-001` all mean
-  `OPP-001` (the same for `SPEC` and `WP`). Anything else (`OPP-0`, `EVD-1`,
-  extra words) gets
-  `Invalid URET ID. Examples: /show OPP-001, /show SPEC-001, /show WP-001` and
-  nothing is read.
-- `/show` alone gets `Usage: /show <URET-ID>` /
-  `Examples: /show OPP-001, /show SPEC-001, /show WP-001`.
 - **Opportunity:** URET ID, Name, Status, Asset type, Project / Asset, Problem
   summary, Target users, Success metrics, Next action, Created, Last updated
   (UTC) and `Notion link:`.
 - **Spec:**
 
   ```
-  SPEC-001 — Bike Tracker Prototype
+  SPEC-002 — Bike Tracker Prototype
 
   Version: v0.1
   Opportunity: OPP-002
   Status: Draft
+  Evidence: 3
   Summary: …
   Scope in: …
   Scope out: …
@@ -91,34 +131,54 @@ Done: 1
   Notion link: https://www.notion.so/…
   ```
 
+  `Evidence` is the total over the Spec's Work Packages.
 - **Work Package:**
 
   ```
-  WP-001 — Harden Bike Tracker prototype
+  WP-002 — Harden Bike Tracker prototype
 
   Type: Hardening
-  Worker: Claude Code
-  Spec: SPEC-001
-  Status: Draft
+  Worker: Manual
+  Spec: SPEC-002
+  Status: In progress
+  Evidence: 2
   Summary: …
   Instructions: …
   Outputs: …
 
   Notion link: https://www.notion.so/…
   ```
+- **Evidence:**
 
-  A Spec's Opportunity and a Work Package's Spec are shown by URET ID. The bot
-  finds them through the other side of the two-way relation (the Opportunity
-  whose `Specs` include this Spec, the Spec whose `Work packages` include this
-  Work Package), with one more read.
-- `Notion link:` is the page URL Notion returns, or `unavailable`. Long text
-  fields are cut to 300 characters with `…`; empty fields show `—`. A trashed
-  record is marked `Archived/trashed record` on the first line.
-- No match: `Not found: SPEC-001`. More than one match:
-  `Notion: Data integrity problem` / `Duplicate URET ID: SPEC-001` (the bot
-  never picks one).
+  ```
+  EVD-002 — Prototype works on LG G8X. Expense logging is clear.
 
-**`/health`**
+  Type: Test results
+  Verdict: Pass
+  Work package: WP-002
+  Summary: Prototype works on LG G8X. Expense logging is clear.
+  Details: Next oil-change date needs to be more visible on home screen.
+  Next action: Add service card to dashboard.
+
+  Notion link: https://www.notion.so/…
+  ```
+
+  Details and Next action are read from the labelled sections of the Summary
+  (see [Evidence](#evidence)). A Summary without those labels (written by hand,
+  or the setup script's EVD-001) shows in full as Summary, with `—` for
+  Details and Next action.
+
+A Spec's Opportunity, a Work Package's Spec and an Evidence record's Work
+package are found through the other side of their two-way relation, by URET
+ID. `Notion link:` is the page URL Notion returns, or `unavailable`. Long text
+fields are cut to 300 characters with `…`; empty fields show `—`; a trashed
+record is marked `Archived/trashed record` on the first line. No match:
+`Not found: EVD-002`. More than one match: `Notion: Data integrity problem` /
+`Duplicate URET ID: EVD-002` (the bot never picks one). If a linked record or
+an evidence count cannot be read, the reply is the Notion text, never a
+made-up value.
+
+### `/health`
 
 ```
 URET CONTROL BOT HEALTH
@@ -135,64 +195,45 @@ Hermes: Not used / isolated legacy system
 ```
 
 Each Notion line says `OK` only if that read succeeded during this `/health`,
-`NOT OK` if it failed, and `NOT CHECKED` if an earlier step failed. Without
-Notion configuration the last three Notion lines are `NOT CHECKED`. `/health`
-checks only the Opportunities source; it never writes.
+`NOT OK` if it failed, and `NOT CHECKED` if an earlier step failed. `/health`
+checks only the Opportunities database and never writes. It confirms that your
+command reached the bot; it does not mean anything is watching or restarting
+the bot.
 
-When Notion cannot answer a read, replies are fixed and short:
-`Notion: Unavailable`, `Notion: Access problem`, `Notion: Request problem`,
-`Notion: Configuration or access problem`, `Notion: Schema problem` or
-`Notion configuration: NOT OK`. Telegram never shows variable names, page or
-data-source IDs, tokens or Notion error details.
+### Guided creation: `/new_opportunity`, `/new_spec`, `/new_work`, `/new_evidence`
 
-### Creating records
+All four work the same way:
 
-All three creation commands work the same way:
-
-- The bot asks one question at a time. Each reply answers the current
-  question, and the next question is numbered (`3/7`, …).
-- **Free-text answers** are required; send `-` to leave one empty. Each is at
-  most 2,000 characters.
-- **Titles** are a single line of at most 200 characters.
-- **Choice questions** take the option's number or its exact name (any case).
-- An invalid answer gets the reason and the same question again; nothing is
-  written.
-- **After the last answer** the bot, in order:
-  1. checks the parent again (`/new_spec`, `/new_work`);
-  2. reserves the next URET ID;
-  3. checks the target database's schema;
-  4. creates the record with its starting Status;
-  5. replies with a confirmation.
+- The bot asks one question at a time, numbered (`3/7`, …); each reply answers
+  the current question. Choice questions take the option's number or its exact
+  name (any case). An invalid answer gets the reason and the same question
+  again; nothing is written.
 - **One session at a time.** Starting another gets
   `You already have an active session. Finish it or use /cancel.` Other
-  commands (`/help`, `/status`, `/show`, …) still work during a session.
+  commands (`/help`, `/status`, `/show`, `/update_status`, …) still work during
+  a session.
 - **`/cancel`** replies `Cancelled. No record created.`, or
   `No active session to cancel.` when there is none.
 - **Sessions expire 30 minutes after they start**, whatever the activity. The
-  next answer then gets, for example, `Session expired. Use /cancel to stop or /new_spec to restart.`
+  next answer then gets, for example,
+  `Session expired. Use /cancel to stop or /new_evidence to restart.`
+- **Parent check** (`/new_spec`, `/new_work`, `/new_evidence`): before any
+  question, the parent must exist exactly once and not be in the trash;
+  otherwise no session starts.
+- **After the last answer** the bot checks the parent again, reserves the next
+  URET ID (see [URET IDs](#uret-ids)), re-reads the target database's schema,
+  creates the record, and replies with a confirmation. If creation fails, the
+  session has already ended and the command must be started again.
 - Sessions are kept in memory only; a restart ends them. Answers are never
   logged.
 
-**`/new_opportunity`**
-
-```
-/new_opportunity
-New Opportunity: 7 questions. Send /cancel to stop.
-
-1/7 Title? (max 200 characters)
-```
+**`/new_opportunity`** — Status is set to **Idea**.
 
 | # | Question | Answer |
 |---|---|---|
 | 1 | Title | Required, one line, max 200 characters |
 | 2 | Asset type | `1` App/PWA, `2` Ebook, `3` Video series, `4` Landing page / site, `5` Template |
-| 3 | Project / Asset | Free text or `-` |
-| 4 | Problem summary | Free text or `-` |
-| 5 | Target users | Free text or `-` |
-| 6 | Success metrics | Free text or `-` |
-| 7 | Next action | Free text or `-` |
-
-Status is set to **Idea**. Confirmation:
+| 3–7 | Project / Asset, Problem summary, Target users, Success metrics, Next action | Free text (max 2,000) or `-` to leave empty |
 
 ```
 Created OPP-002
@@ -206,37 +247,15 @@ Next action: Create prototype brief
 Stored in URET – Opportunities.
 ```
 
-**`/new_spec <OPP-ID>`**
-
-```
-/new_spec OPP-002
-New Spec for OPP-002: 6 questions. Send /cancel to stop.
-
-1/6 Title? (max 200 characters)
-```
-
-**Parent check:** before any question, the Opportunity must exist exactly once
-and not be in the trash. Otherwise no session starts and the bot replies:
-
-- `Opportunity OPP-002 not found.`
-- `Data integrity problem: multiple records found for OPP-002.`
-- `Opportunity OPP-002 is in the trash.`
-
-`/new_spec` with no ID replies `Usage: /new_spec <OPP-ID>`; a non-OPP ID gets
-`Invalid Opportunity ID. Example: /new_spec OPP-001`. The Opportunity is checked
-again after the last answer.
+**`/new_spec <OPP-ID>`** — Status **Draft**, linked to the Opportunity. With no
+ID: `Usage: /new_spec <OPP-ID>` / `Example: /new_spec OPP-001`; a non-OPP ID:
+`Invalid Opportunity ID. Example: /new_spec OPP-001`.
 
 | # | Question | Answer |
 |---|---|---|
 | 1 | Title | Required, one line, max 200 characters |
 | 2 | Version | Required, one line, max 50 characters (for example `v0.1`) |
-| 3 | Summary | Free text or `-` |
-| 4 | Scope in | Free text or `-` |
-| 5 | Scope out | Free text or `-` |
-| 6 | Constraints | Free text or `-` |
-
-Status is set to **Draft** and the Spec is linked to the Opportunity.
-Confirmation:
+| 3–6 | Summary, Scope in, Scope out, Constraints | Free text (max 2,000) or `-` to leave empty |
 
 ```
 Created SPEC-001
@@ -249,32 +268,16 @@ Status: Draft
 Stored in URET – Specs.
 ```
 
-**`/new_work <SPEC-ID>`**
-
-```
-/new_work SPEC-001
-New Work Package for SPEC-001: 6 questions. Send /cancel to stop.
-
-1/6 Title? (max 200 characters)
-```
-
-**Parent check:** the same as for `/new_spec`, for the Spec: `Spec SPEC-001 not
-found.`, `Data integrity problem: multiple records found for SPEC-001.` or
-`Spec SPEC-001 is in the trash.`, and no session starts. With no ID, or a
-non-SPEC ID, the bot replies with usage or
+**`/new_work <SPEC-ID>`** — Status **Draft**, linked to the Spec. With no ID:
+`Usage: /new_work <SPEC-ID>` / `Example: /new_work SPEC-001`; a non-SPEC ID:
 `Invalid Spec ID. Example: /new_work SPEC-001`.
 
 | # | Question | Answer |
 |---|---|---|
 | 1 | Title | Required, one line, max 200 characters |
 | 2 | Type | `1` Prototype, `2` Feature, `3` Bug fix, `4` Research, `5` Hardening |
-| 3 | Worker | `1` Claude Code, `2` Manual (Emmanuel) |
-| 4 | Summary | Free text or `-` |
-| 5 | Instructions | Free text or `-` |
-| 6 | Outputs | Free text or `-` |
-
-For Worker, `Emmanuel` (any case) is accepted and stored as **Manual**. Status
-is set to **Draft** and the Work Package is linked to the Spec. Confirmation:
+| 3 | Worker | `1` Claude Code, `2` Manual (Emmanuel) — `Emmanuel` in any case is stored as **Manual** |
+| 4–6 | Summary, Instructions, Outputs | Free text (max 2,000) or `-` to leave empty |
 
 ```
 Created WP-001
@@ -288,45 +291,197 @@ Status: Draft
 Stored in URET – Work Packages.
 ```
 
-**If creation fails**, the session has already ended, so the command must be
-started again. The reply is one of:
+**`/new_evidence <WP-ID>`** — linked to the Work Package (Evidence has no
+Status). With no ID: `Usage: /new_evidence <WP-ID>` /
+`Example: /new_evidence WP-001`; a SPEC or other ID:
+`Invalid Work package ID. Example: /new_evidence WP-001`.
+
+| # | Question | Answer |
+|---|---|---|
+| 1 | Type | `1` Observation, `2` Test results, `3` Research, `4` User feedback, `5` Metrics |
+| 2 | Summary | Required, max 500 characters |
+| 3 | Verdict | `1` Pass, `2` Fail, `3` Mixed, `4` N/A |
+| 4 | Details | Required, max 2,000 characters, may span lines |
+| 5 | Next action | Required, max 500 characters |
+
+All three text answers are required: an empty answer or a bare `-` gets
+`Answer required. This field cannot be empty.` The record's Name is the
+Summary answer on one line, cut to 200 characters.
+
+```
+Created EVD-002
+
+Type: Test results
+Verdict: Pass
+Work package: WP-002
+Summary: Prototype works on LG G8X. Expense logging is clear.
+
+Stored in URET – Evidence.
+```
+
+### `/update_status <URET-ID> <status>`
+
+Changes the **Status** field of one Opportunity, Spec or Work Package. No
+guided session. The status may be several words and is matched in any case
+(`/update_status wp-2 in progress` sets "In progress").
+
+| Type | Allowed statuses |
+|---|---|
+| Opportunity (`OPP-…`) | Idea, Active, Parked, Done |
+| Spec (`SPEC-…`) | Draft, Approved, Superseded |
+| Work Package (`WP-…`) | Draft, In progress, Done, Blocked |
+
+In order, with nothing written until the last step:
+
+1. Missing arguments: `Usage: /update_status <URET-ID> <status>` /
+   `Example: /update_status OPP-002 Active`. An EVD, REL or malformed ID:
+   `Invalid URET ID. Example: /update_status OPP-002 Active`. A status not in
+   the type's list: `Invalid status. Use one of: Idea, Active, Parked, Done.`
+   (that type's list). No Notion call is made.
+2. The record is looked up: `Opportunity OPP-999 not found.` (or Spec, Work
+   package); `Data integrity problem: multiple records found for OPP-002.`;
+   `Opportunity OPP-002 is in the trash.`
+3. Already at that status: `OPP-002 is already Active.` — nothing is written.
+4. Otherwise the Status, and only the Status, is changed:
+   `Updated OPP-002 status to Active.`
+
+## 3. Schemas
+
+The bot expects the five databases as the setup script creates them, directly
+under URET Root. It checks the properties it uses (name and type) when it first
+finds each database, and again before every write; select values must already
+exist as options, because the bot never adds options.
+
+### Opportunities (`URET – Opportunities`)
+
+| Property | Type | Notes |
+|---|---|---|
+| URET ID | rich_text | `OPP-001`, … |
+| Name | title | |
+| Status | select | **Idea**, **Active**, **Parked**, **Done** (all four required) |
+| Asset type | multi_select | App/PWA, Ebook, Video series, Landing page / site, Template |
+| Project / Asset, Problem summary, Target users, Success metrics, Next action | rich_text | |
+| Created / Last updated | created_time / last_edited_time | |
+| Specs | relation | reverse side of Specs → Opportunity |
+| Releases | relation | |
+
+### Specs (`URET – Specs`)
+
+| Property | Type | Notes |
+|---|---|---|
+| URET ID | rich_text | `SPEC-001`, … |
+| Name | title | |
+| Opportunity | relation → Opportunities | two-way; reverse property `Specs` |
+| Version, Summary, Scope in, Scope out, Constraints, Branch | rich_text | |
+| Status | select | **Draft**, **Approved**, **Superseded** |
+| Repo | url | |
+| Work packages | relation | reverse side of Work Packages → Spec |
+| Releases | relation | |
+
+### Work Packages (`URET – Work Packages`)
+
+| Property | Type | Notes |
+|---|---|---|
+| URET ID | rich_text | `WP-001`, … |
+| Name | title | |
+| Spec | relation → Specs | two-way; reverse property `Work packages` |
+| Type | select | Prototype, Feature, Bug fix, Research, Hardening |
+| Worker | select | must include Claude Code and Manual |
+| Status | select | **Draft**, **In progress**, **Done**, **Blocked** |
+| Summary, Instructions, Outputs | rich_text | |
+| Commit / PR | url | |
+| Start date, End date | date | |
+| Evidence | relation | reverse side of Evidence → Work package |
+
+### Evidence
+
+`URET – Evidence`:
+
+| Property | Type | Notes |
+|---|---|---|
+| URET ID | rich_text | `EVD-001`, … |
+| Name | title | the Summary answer on one line, max 200 characters |
+| Work package | relation → Work Packages | two-way; reverse property `Evidence` |
+| Type | select | Observation, Test results, Research, User feedback, Metrics |
+| Summary | rich_text | structured, see below |
+| Verdict | select | Pass, Fail, Mixed, N/A |
+| Evidence link, Date | url, date | in the setup script's schema; not used by the bot |
+
+Evidence has no Status. Details and Next action have no properties of their
+own; `/new_evidence` stores them in **Summary** as labelled sections:
+
+```
+<summary>
+
+Details:
+<details>
+
+Next action:
+<next action>
+```
+
+`/show EVD` splits the text at the first `Details:` and `Next action:` labels.
+
+## 4. Error messages
+
+### Input and session
+
+| Reply | When |
+|---|---|
+| `Unknown command. Use /help to see the available commands.` | An unknown command, or text with no session open |
+| `Notion configuration: NOT OK` | A Notion command without Notion configured |
+| `The title cannot be empty.` / `The title must be a single line.` / `The title is too long (max 200 characters).` | Title answers |
+| `The version cannot be empty.` / `The version must be a single line.` / `The version is too long (max 50 characters).` | Spec Version answers |
+| `Invalid asset type. Reply with a number from 1 to 5.` (also `type`, `worker`, `verdict`, with their own ranges) | Choice answers |
+| `Please answer, or send - to leave it empty.` | An empty free-text answer (Opportunity, Spec, Work Package flows) |
+| `Answer required. This field cannot be empty.` | An empty or `-` Evidence text answer |
+| `Too long (max 2000 characters).` (or `500` for Evidence Summary and Next action) | Over-long text answers |
+| `Please answer with text.` | A photo, sticker or other non-text message during a session |
+| `You already have an active session. Finish it or use /cancel.` | A second creation command during a session |
+| `Session expired. Use /cancel to stop or /new_… to restart.` | The first message after a session expired |
+| Usage and invalid-ID texts | See each command above |
+
+### Data integrity
+
+| Reply | When |
+|---|---|
+| `Notion: Data integrity problem` / `Unexpected Opportunity status values found.` | `/status`: an Opportunity has no status or an unknown one |
+| `Notion: Data integrity problem` / `Duplicate URET ID: …` | `/show`: more than one record has the ID |
+| `Data integrity problem: multiple records found for …` | A parent (`/new_spec`, `/new_work`, `/new_evidence`) or `/update_status` target has a duplicated ID |
+| `… not found.` / `… is in the trash.` | The parent or the `/update_status` target does not exist, or is trashed |
+
+### Notion, when reading
+
+Used by `/status`, `/show`, the parent check before a session, and the
+`/update_status` lookup.
+
+| Reply | Cause |
+|---|---|
+| `Notion: Unavailable` | Timeout, rate limit, server error, conflict or network failure |
+| `Notion: Access problem` | The token is wrong or lacks access |
+| `Notion: Request problem` | Notion rejected the request |
+| `Notion: Configuration or access problem` | A database is missing, duplicated or not directly under URET Root |
+| `Notion: Schema problem` | A required property is missing or has the wrong type |
+
+### Notion, when writing
+
+Used after the last answer of a creation command, and by `/update_status`.
 
 | Reply | Meaning |
 |---|---|
-| `Notion write failed. Please try again.` | Notion refused the record. |
-| `Notion is unavailable. Please try again later.` | Notion timed out, was busy or rate-limited, or could not be reached. Nothing was created. |
-| `Notion access problem. Check configuration.` | The token or its access is wrong, or a database could not be found under URET Root. |
-| `Notion schema problem. Cannot create record.` | A property is missing or has the wrong type, or a chosen option (for example an Asset type or Status "Draft") does not exist in Notion. The bot never adds options. |
-| `ID allocation failed. Please try again.` | The counter file is locked, unreadable or could not be saved, or more than 25 IDs in a row already exist in Notion (see [URET IDs](#uret-ids)). Nothing was created. |
-| `Notion did not confirm the write. Check Notion for OPP-005 before trying again.` | The create was sent, but the answer was lost (timeout, network or server error). The record may exist. Check Notion before creating it again. |
+| `Notion write failed. Please try again.` | Notion refused the write. Nothing was created or changed. |
+| `Notion is unavailable. Please try again later.` | Notion timed out, was busy or rate-limited, or could not be reached. Nothing was created or changed. |
+| `Notion access problem. Check configuration.` | The token or its capabilities are wrong, or a database could not be found under URET Root. |
+| `Notion schema problem. Cannot create record.` | A property is missing or mistyped, or a chosen option does not exist. The bot never adds options. |
+| `Notion schema problem. Cannot update record.` | The same, for `/update_status` (for example the Status option is missing). |
+| `ID allocation failed. Please try again.` | The counter file is locked, unreadable or could not be saved, or more than 25 IDs in a row already exist. Nothing was created. |
+| `Notion did not confirm the write. Check Notion for OPP-005 before trying again.` | A create was sent but the answer was lost. The record may exist. |
+| `Notion did not confirm the update. Check with /show OPP-002.` | A Status change was sent but the answer was lost. Setting a status twice is harmless. |
 
-### URET IDs
+Telegram never shows variable names, page or data-source IDs, tokens or Notion
+error details; logs contain only fixed labels.
 
-New IDs come from `uret-id-counters.json`, which holds the last number used
-per prefix (for example `"OPP": 1` means OPP-001 is taken and OPP-002 is next).
-For each new record the bot:
-
-1. takes the lock `uret-id-counters.json.lock`, the same lock the setup script
-   uses, so the two never allocate at the same time;
-2. checks each candidate ID in Notion and skips any that already exist
-   (including trashed or duplicated ones), at most 25 in a row;
-3. saves the new number (written to a temporary file, flushed, then renamed
-   over the original) and releases the lock.
-
-A reserved number is never given back, even if creating the record then fails,
-so **gaps are normal** (for example OPP-004 missing between OPP-003 and
-OPP-005). Duplicates are prevented by the Notion check, even if the counter
-file is reset, for example by `git checkout`.
-
-`uret-id-counters.json` is tracked by Git, so after creating records
-`git status` shows it as changed. That is expected. Before `git pull` or
-`git checkout`, commit it or keep a copy. If it is overwritten anyway, the
-Notion check still prevents duplicate IDs.
-
-If the bot is killed while it holds the lock, `uret-id-counters.json.lock` is
-left behind and every creation replies `ID allocation failed. Please try
-again.` Delete that file, **only when neither the bot nor the setup script is
-running**.
+## 5. Integration setup
 
 ### Who can use it
 
@@ -337,14 +492,210 @@ groups and channels, are silently ignored and never reach Notion.
 
 ### Requirements
 
-- Node.js 18 or newer (Termux: `pkg install nodejs git`)
+- Node.js 18 or newer (Termux: `pkg install nodejs git`).
 - A Telegram bot token from @BotFather, created for this bot only.
 - Your own numeric Telegram user ID (a number, not your `@username`).
-- Only for the Notion commands: `npm ci` once (see below), a Notion
-  integration token with **Read content** and **Insert content**, and the URET
+- For the Notion commands: `npm ci` once, a Notion integration token with
+  **Read content**, **Insert content** and **Update content**, and the URET
   Root page ID.
 
-### Setup on Termux
+### Notion integration
+
+Use a **separate** Notion integration for the bot, for example
+**URET Control Bot**:
+
+1. Create an internal integration in Notion's integration settings.
+2. Under its capabilities, allow **Read content**, **Insert content** and
+   **Update content**:
+   - **Insert content** is needed to create records;
+   - **Update content** is needed by `/update_status`. The bot's code still
+     changes only the Status property; this is enforced by static tests.
+3. Connect it only to the **URET Root** page (the databases under it inherit
+   access). Do not connect it anywhere else.
+4. Put its token in `NOTION_TOKEN` in `.env`.
+
+An integration set up for Phase 2A (read only) or Phase 3-5 (read and insert)
+must be given the missing capabilities first. Without Insert content, creation
+replies `Notion access problem. Check configuration.`; without Update content,
+`/update_status` does.
+
+Independently of the token's permissions, the bot code is limited to:
+
+- **Reads:** only `bot/notion.js` reads, with its four read operations.
+- **Writes:** only `bot/notionWrite.js` writes. It calls `pages.create`
+  (written once in the code) and `pages.update` (written once, with a payload
+  that contains only the Status property), each after re-reading the target
+  database's schema. It builds every property itself.
+- **Never:** no delete, move or append, no other page call, no search, and no
+  generic request. Static tests (`test/static.test.js`) fail the build if any
+  appears, if `pages.update` is given any other payload, or if another file
+  loads the Notion library.
+- **Requests:** Notion API version 2025-09-03, a 10-second timeout and **no
+  retries**. The Notion library's own console logging is switched off.
+
+### Database setup
+
+The databases are created by the setup script, `create-uret-databases.js`,
+which the bot never runs. On the first command that needs a database, the bot
+lists the direct children of URET Root and requires **exactly one** database
+with the expected title (`URET – Opportunities`, `URET – Specs`,
+`URET – Work Packages`, `URET – Evidence` or `URET – Releases`; dash, spacing
+and case differences are ignored). It then checks that:
+
+- the database's parent is URET Root;
+- it is not in the trash;
+- it has exactly one data source;
+- the data source has the properties of [section 3](#3-schemas).
+
+Each data source is remembered in memory until the bot restarts. If Notion later
+reports one missing, the bot forgets it and looks again on the next command.
+
+### URET IDs
+
+New IDs come from `uret-id-counters.json`, which holds the last number used
+per prefix (for example `"OPP": 2` means OPP-002 is taken and OPP-003 is next).
+For each new record the bot:
+
+1. takes the lock `uret-id-counters.json.lock`, the same lock the setup script
+   uses, so the two never allocate at the same time;
+2. checks each candidate ID in Notion and skips any that already exist
+   (including trashed or duplicated ones), at most 25 in a row;
+3. saves the new number (written to a temporary file, flushed, then renamed
+   over the original) and releases the lock.
+
+A reserved number is never given back, so **gaps are normal**. Duplicates are
+prevented by the Notion check, even if the counter file is reset, for example
+by `git checkout`. The setup script's example records (OPP-001, SPEC-001,
+WP-001, EVD-001, REL-001) are skipped this way.
+
+`uret-id-counters.json` is tracked by Git, so after creating records
+`git status` shows it as changed; commit it or keep a copy before `git pull` or
+`git checkout`. If the bot is killed while it holds the lock,
+`uret-id-counters.json.lock` is left behind and every creation replies
+`ID allocation failed. Please try again.` Delete that file, **only when neither
+the bot nor the setup script is running**.
+
+## 6. Known limitations
+
+- **KL-1: a creation outcome can be lost in transit.** The record can be
+  created in Notion while the Telegram confirmation never arrives. If a
+  creation command receives no Telegram reply, do not immediately retry. Check
+  with `/show <expected-ID>` first. The expected ID is the number now in
+  `uret-id-counters.json`, because the number is saved when it is reserved,
+  before the record is created: for example `"WP": 2` means `/show WP-002`. If
+  the record exists, creation succeeded. Retry only if confirmed Not Found. A retry after a successful
+  create makes a duplicate record with the next ID; ID reservation prevents ID
+  collisions, not duplicate records.
+- **Relation targets are not checked.** The schema check confirms that a
+  property is a relation, not which database it points to (for example
+  Evidence → `Work package`). If a relation were re-pointed by hand, writes
+  would fail with `Notion write failed. Please try again.` and linked records
+  would show as `—`.
+- **Performance.** `/status` reads the counts (up to 10 queries), the active
+  work list, and two more queries per active Work Package, one after another:
+  a few seconds is normal. `/show SPEC` makes one query for the Spec's Work
+  Packages and one per Work Package (up to 25). The first command after a
+  start also has to find each database.
+- **Changes are limited to Status.** The bot cannot change other fields,
+  delete, move or re-link records; do that in Notion. Evidence and Releases
+  have no status command, and Releases cannot be created.
+- **No retry of answers:** if creation fails, the answers are gone and the
+  command must be started again.
+- **Options must already exist** in Notion; a missing option is a schema
+  problem.
+- **`/health` checks only Opportunities**, not the other databases.
+- **Placement:** the databases must sit **directly** on URET Root, not inside a
+  column, toggle or sub-page. Zero or several matching databases are a
+  configuration or access problem; the bot never guesses or searches the
+  workspace.
+- **Caps:** `/status` counts at most 1,000 Opportunities; evidence counts read
+  at most 1,000 records per Work Package and 25 Work Packages per Spec (shown
+  with `+` beyond that); discovery stops if URET Root has more than 1,000 child
+  blocks.
+- **Timeout, no retry:** each Notion request times out after 10 seconds and is
+  never retried.
+- **Trashed records:** if Notion's query does not return trashed pages, `/show`
+  for a trashed record says `Not found` rather than `Archived/trashed record`.
+- **One message at a time:** messages are handled in order, so a slow command
+  delays the next one.
+- **Notion links contain the page's ID**, as Notion's page URLs do. Data-source
+  and root page IDs are never shown.
+- **Restart:** messages sent while the bot was stopped are discarded, not run.
+  Open guided sessions are lost. If the bot is stopped (Ctrl+C) during a write,
+  the write may still reach Notion: check with `/show` after restarting.
+- **One copy only:** if another process is already receiving updates for the
+  same bot token, Telegram reports a conflict and the bot stops with exit code
+  1 instead of retrying.
+
+## 7. Testing
+
+```sh
+npm ci      # once; the tests use the Notion library's error classes
+npm test
+```
+
+398 tests in 20 files (`node --test`), with a fake Telegram API, fake Notion
+clients and randomly generated fake tokens and IDs. They make no network calls
+and write only to temporary folders. They never read or write the real
+`uret-id-counters.json`: a guard makes any such access fail the run, and
+checks afterwards that the file is unchanged.
+
+| Area | Files |
+|---|---|
+| Notion adapters | `notion.test.js`, `notionWrite.test.js` |
+| Creation flows | `newOpportunity.test.js`, `newSpec.test.js`, `newWork.test.js`, `evidence.test.js`, `chain.test.js` (back-to-back creates and read-back) |
+| Status | `updateStatus.test.js`, `status.test.js` |
+| Sessions and IDs | `captureSession.test.js`, `idCounter.test.js`, `counterGuard.test.js` |
+| Router, formats, whole bot | `commands.test.js`, `opportunities.test.js`, `bot.test.js` (including log checks for every creation command and `/update_status`) |
+| Phase 1 modules | `auth.test.js`, `config.test.js`, `logger.test.js`, `session.test.js` |
+| Static rules | `static.test.js` |
+
+**Coverage.** `node --test --experimental-test-coverage test/*.test.js` reports
+100% line coverage for every Phase 4 module. The only uncovered block in `bot/`
+is `main()` in `bot/index.js`, which needs a live configuration; its wiring is
+checked by a static test.
+
+**Mutation testing.** During development each step was checked by introducing
+deliberate bugs into the new code, one at a time (for example a widened status
+list, an extra property in the update payload, a skipped Notion check), and
+confirming that the tests fail. These checks were run by hand and are not part
+of `npm test`.
+
+## 8. Development
+
+### Project structure
+
+| File | Role |
+|---|---|
+| `bot/index.js` | Entry point: configuration, polling loop, wiring of the adapters |
+| `bot/telegram.js`, `bot/auth.js`, `bot/config.js`, `bot/logger.js`, `bot/session.js` | Phase 1: Telegram client, authorization, configuration, logs, session store |
+| `bot/commands.js` | Command router; `/status`, `/show`, `/health`, `/cancel` |
+| `bot/captureSession.js`, `bot/captureFlows.js` | Guided sessions and the four creation flows |
+| `bot/statusUpdate.js` | `/update_status` |
+| `bot/opportunities.js` | ID parsing and reply formats |
+| `bot/health.js` | `/health` |
+| `bot/idCounter.js` | URET ID reservation |
+| `bot/notion.js`, `bot/notionWrite.js` | The read and write adapters |
+| `test/` | Tests (`helpers.js` holds shared fakes and the counter-file guard) |
+
+### Static rules
+
+`test/static.test.js` enforces, on every run:
+
+- only `bot/notion.js` and `bot/notionWrite.js` load `@notionhq/client`, and
+  only `bot/index.js` loads those adapters and the ID counter;
+- the read adapter calls exactly its four reads; the write adapter calls exactly
+  `pages.create` (once), `pages.update` (once, Status-only payload) and
+  `dataSources.retrieve`; no other file touches a Notion client;
+- no page API, search, generic request, delete, move or append anywhere else;
+- database titles appear only in the adapters and the four locked
+  "Stored in URET – …" confirmation lines (Releases only in the read adapter);
+- the counter file is named only in `bot/idCounter.js` and `test/helpers.js`;
+- no AI provider, webhook, server, GitHub or crawler code (the Worker option
+  "Claude Code" is the one allowed literal), only the Telegram host, no new
+  dependencies, and no token- or ID-shaped text.
+
+### Deployment (Termux)
 
 ```sh
 git clone https://github.com/uniqueapps-dev/uret-control-plane.git
@@ -353,100 +704,26 @@ git checkout feature/uret-control-bot-mvp-v0.1
 cp .env.example .env
 chmod 600 .env
 nano .env        # fill in the values; never commit or share this file
+npm ci           # installs exactly @notionhq/client 5.26.0 from package-lock.json
 ```
 
-`.env` holds four variables. Only `.env.example`, which has no values, is
-committed; `.env` is ignored by Git.
+`.env` holds four variables; only `.env.example`, which has no values, is
+committed.
 
 | Variable | Needed for |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Always |
 | `TELEGRAM_ALLOWED_USER_ID` | Always |
-| `NOTION_TOKEN` | `/status`, `/show`, the creation commands, Notion lines of `/health` |
-| `URET_ROOT_PAGE_ID` | Same as above (32 hex characters, with or without dashes) |
+| `NOTION_TOKEN` | Every Notion command and the Notion lines of `/health` |
+| `URET_ROOT_PAGE_ID` | Same (32 hex characters, with or without dashes) |
 
-**Notion is optional.** If both Notion variables are empty, the bot starts
-normally, `/start`, `/help`, `/cancel` and `/health` work, and `/status`,
-`/show`, `/new_opportunity`, `/new_spec` and `/new_work` reply
-`Notion configuration: NOT OK`. If only one is set, or either is malformed,
-the bot still starts and the terminal (never Telegram) names the variable and
-whether it is `missing` or `malformed`, never its value.
+Notion is optional: with both Notion variables empty, the bot starts and the
+Notion commands reply `Notion configuration: NOT OK`. If only one is set, or
+either is malformed, the terminal (never Telegram) names the variable and
+whether it is `missing` or `malformed`, never its value. If a Telegram variable
+is missing or malformed, the bot exits the same way.
 
-**Install the Notion library.** This is required whenever Notion is
-configured:
-
-```sh
-npm ci
-```
-
-This installs exactly `@notionhq/client` 5.26.0 from `package-lock.json`. No
-other package is used.
-
-### Notion integration
-
-Use a **separate** Notion integration for the bot, for example
-**URET Control Bot**:
-
-1. Create an internal integration in Notion's integration settings.
-2. Under its capabilities, allow **Read content** and **Insert content**.
-   **Insert content** is required to create records. Leave **Update content**
-   off: the bot never needs it.
-3. Connect it only to the **URET Root** page (the databases under it inherit
-   access). Do not connect it anywhere else.
-4. Put its token in `NOTION_TOKEN` in `.env`.
-
-If the bot was set up with a read-only integration in Phase 2A, turn on
-**Insert content** for it (or create a new integration) before using the
-creation commands. Without it, creation replies
-`Notion access problem. Check configuration.`
-
-> **To confirm in the first live test:** a new Spec or Work Package is linked
-> to its parent through a two-way relation, so Notion also fills in the
-> parent's reverse property (`Specs` or `Work packages`). Whether Notion
-> requires **Update content** for that has not been tested against the live
-> workspace. If creating a Spec fails with an access problem while
-> `/new_opportunity` works, that is the likely cause.
-
-Independently of the token's permissions, the bot code is limited to:
-
-- **Reads:** only `bot/notion.js` reads, with four operations: list the root
-  page's child blocks, retrieve a database, retrieve a data source, and query a
-  data source.
-- **Writes:** only `bot/notionWrite.js` writes. It calls only
-  `dataSources.retrieve`, to check the schema, and `pages.create`, which
-  appears exactly once in the code. It builds every property itself and fixes
-  the starting Status.
-- **Never:** no page update, delete, move or append, no search, and no generic
-  request. Static tests (`test/static.test.js`) fail the build if any
-  appears, or if another file loads the Notion library. The adapter tests run
-  against fake Notion clients that throw on anything else.
-- **Requests:** Notion requests use API version 2025-09-03, a 10-second timeout
-  and **no retries**. The Notion library's own console logging is switched off,
-  and Notion errors are reduced to fixed labels before they reach logs or
-  replies.
-
-### How the bot finds the URET databases
-
-On the first command that needs a database, the bot lists the direct children
-of URET Root and requires **exactly one** database with the expected title
-(`URET – Opportunities`, `URET – Specs`, `URET – Work Packages`,
-`URET – Evidence` or `URET – Releases`; dash, spacing and case differences are
-ignored). It then checks that:
-
-- the database's parent is URET Root;
-- it is not in the trash;
-- it has exactly one data source;
-- the data source has the required properties and types (for Opportunities,
-  Status options Idea, Active, Parked and Done).
-
-Each data source is remembered in memory only, until the bot restarts. If
-Notion later reports one missing, the bot forgets it and looks again on the
-next command. Before every create, the target data source's schema is read
-again.
-
-### Run
-
-Load `.env` into the shell and start the bot (works on any Node 18+):
+Run (any Node 18+):
 
 ```sh
 set -a; . ./.env; set +a
@@ -454,82 +731,20 @@ npm run start:bot
 ```
 
 On Node 20.6 or newer you can instead run `node --env-file=.env bot/index.js`.
+Stop with **Ctrl+C**. To update: stop the bot, keep or commit
+`uret-id-counters.json`, then `git pull` and `npm ci`.
 
-Stop it with **Ctrl+C**. The bot stops polling and abandons any pending Notion
-request without replying. If that was a create, it may still have reached
-Notion: check with `/show` after restarting.
-
-If a Telegram variable is missing or malformed, the bot exits and names the
-variable and its status (`missing` or `malformed`), never the value.
-
-### Limitations
-
-- **Create only:** the bot creates Opportunities, Specs and Work Packages. It
-  cannot update, delete, move or re-link records; do that in Notion.
-- **No Evidence or Release creation yet.** The bot recognises those databases
-  but has no command that creates or shows them.
-- **ID gaps:** a reserved ID is never given back, so a failed or unconfirmed
-  create leaves a gap in the numbering.
-- **No retry of answers:** if creation fails, the answers are gone and the
-  command must be started again.
-- **Options must already exist:** the bot never adds select options to Notion.
-  A missing option makes creation reply with the schema problem text.
-- **Placement:** the databases must sit **directly** on URET Root, not inside a
-  column, toggle or sub-page. Zero or several matching databases are reported
-  as a configuration or access problem; the bot never guesses.
-- **No workspace search:** the bot only looks under URET Root.
-- **1,000-record cap:** `/status` reads at most 10 pages of 100 records. With
-  more, it reports the counts as incomplete instead of partial numbers.
-- **Timeout, no retry:** each Notion request times out after 10 seconds and is
-  never retried. Send the command again later if you want to try again.
-- **Trashed records:** trashed Opportunities are excluded from `/status`. If
-  Notion's query does not return trashed pages, `/show` for a trashed record
-  says `Not found` rather than `Archived/trashed record`. There is no fallback
-  search.
-- **Root page size:** if URET Root has more than 1,000 child blocks, discovery
-  stops and reports the source as ambiguous.
-- **One command at a time:** messages are handled in order, so a slow Notion
-  request (up to 10 seconds each) delays the next message.
-- **Notion links contain the page's ID**, as Notion's page URLs do. Data-source
-  and root page IDs are never shown.
-
-### Behaviour worth knowing
-
-- **One copy only:** if another process is already receiving updates for the
-  same bot token, Telegram reports a conflict and the bot stops with exit code 1
-  instead of retrying. Stop the other copy, then start the bot again.
-- **Restart:** messages sent while the bot was stopped are discarded, not run.
-  All in-memory state, including open guided sessions, is lost on restart;
-  nothing is restored.
-- **Logs:** one JSON line per event in `logs/bot.log` (also printed to the
-  terminal). Only these fields are recorded: timestamp, event, command,
-  result, error class, duration, and whether the sender was authorized.
-  Message text, answers, URET IDs of created records, user IDs, URLs, tokens
-  and Notion IDs are never logged.
-- **`/health`** confirms that your command reached the bot and reports what it
-  could check at that moment. It does not mean anything is watching or
-  restarting the bot. If Termux stops the process, nothing restarts it.
-- **Files written:** `logs/` (local, ignored by Git) and
-  `uret-id-counters.json`, with its short-lived lock and temporary files, when
-  a record is created. Guided sessions are kept in memory only.
+**Logs:** one JSON line per event in `logs/bot.log` (also printed to the
+terminal), with only timestamp, event, command, result, error class, duration
+and whether the sender was authorized. Message text, answers, URET IDs, user
+IDs, URLs, tokens and Notion IDs are never logged. **Files written:** `logs/`
+(ignored by Git) and `uret-id-counters.json` with its short-lived lock and
+temporary files.
 
 ### Out of scope
 
 The bot does not use AI or language models, Hermes, the GitHub API, cloud
-hosting, web crawlers or webhooks. It does not update, delete or move records,
-does not create Evidence or Releases, and does not use the setup script.
-
+hosting, web crawlers or webhooks. It does not delete or move records, change
+any field but Status, create Releases, or run the setup script.
 `create-uret-databases.js` and `package-lock.json` are left unchanged by the
-bot work. `uret-id-counters.json` is changed only by ID allocation.
-
-### Tests
-
-```sh
-npm ci      # once; the tests use the Notion library's error classes
-npm test
-```
-
-Tests use a fake Telegram API, fake Notion clients and randomly generated fake
-tokens and IDs. They make no network calls and write only to temporary folders.
-They never read or write the real `uret-id-counters.json`: a guard makes any
-such access fail the run, and checks afterwards that the file is unchanged.
+bot work; `uret-id-counters.json` is changed only by ID allocation.
