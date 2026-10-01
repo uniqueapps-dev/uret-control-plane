@@ -33,6 +33,9 @@ const MAX_LINKED = 10;
 // incomplete instead of being cut silently.
 const MAX_COUNT_PAGES = 10;
 const MAX_SPEC_WORK_PACKAGES = 25;
+// /status: the most recently edited Work Packages with one of these statuses.
+const ACTIVE_WORK_STATUSES = ["In progress", "Draft"];
+const MAX_ACTIVE_WORK = 5;
 
 // Opportunities: required properties and types (Status options checked separately).
 const REQUIRED_SCHEMA = {
@@ -437,6 +440,36 @@ function createNotionReader({ client, rootPageId }) {
   }
 
   /**
+   * Active work for /status: Work Packages whose Status is one of
+   * ACTIVE_WORK_STATUSES, most recently edited first (Notion's last-edited
+   * timestamp; Work Packages have no "Last updated" property), at most
+   * MAX_ACTIVE_WORK. Returns { items: [{ uretId, title, pageId }], more }.
+   */
+  async function listActiveWork({ signal } = {}) {
+    return withSource("wp", signal, async (source) => {
+      const res = await call(
+        () =>
+          client.dataSources.query({
+            data_source_id: source.dataSourceId,
+            filter: { or: ACTIVE_WORK_STATUSES.map((name) => ({ property: "Status", select: { equals: name } })) },
+            sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
+            page_size: MAX_ACTIVE_WORK,
+          }),
+        signal
+      );
+      const items = ((res && res.results) || [])
+        .filter((item) => item && item.object === "page" && !isTrashed(item))
+        .map((item) => {
+          const props = item.properties || {};
+          const uretId = props["URET ID"] && props["URET ID"].type === "rich_text" ? plainTitle(props["URET ID"].rich_text).trim() : "";
+          const title = props.Name && props.Name.type === "title" ? plainTitle(props.Name.title).trim() : "";
+          return { uretId, title, pageId: item.id };
+        });
+      return { items, more: Boolean(res && res.has_more) };
+    });
+  }
+
+  /**
    * ID of the verified data source for a source type, discovering it if
    * needed; refused if its schema is invalid. For the write adapter only:
    * the ID stays inside the process and is never logged or shown.
@@ -492,6 +525,7 @@ function createNotionReader({ client, rootPageId }) {
     findLinkedUretIds,
     countEvidenceForWP,
     countEvidenceForSpec,
+    listActiveWork,
     getDataSourceId,
     health,
     // For tests: whether a source type's data source is currently remembered.
@@ -511,6 +545,8 @@ module.exports = {
   MAX_STATUS_PAGES,
   MAX_COUNT_PAGES,
   MAX_SPEC_WORK_PACKAGES,
+  ACTIVE_WORK_STATUSES,
+  MAX_ACTIVE_WORK,
   NotionReadError,
   createNotionClient,
   createNotionReader,

@@ -23,8 +23,9 @@ const ELEVEN = ["/start", "/help", "/cancel", "/status", "/show", "/health", "/n
 // Error shaped like the adapter's NotionReadError: a fixed label only.
 const labelled = (label) => Object.assign(new Error(`Notion read failed (${label})`), { label });
 
-// Fake read-only adapter recording every call.
-function fakeNotion({ count, find, health } = {}) {
+// Fake read-only adapter recording every call. `active` answers the /status
+// active-work read (default: none), `linked` and `evidence` its per-item reads.
+function fakeNotion({ count, find, health, active = { items: [], more: false }, linked = { uretIds: [], more: false }, evidence = { count: 0, incomplete: false } } = {}) {
   const calls = [];
   const answer = (value, ...args) => (typeof value === "function" ? value(...args) : value);
   return {
@@ -40,6 +41,18 @@ function fakeNotion({ count, find, health } = {}) {
     health: async (opts) => {
       calls.push({ method: "health", opts });
       return answer(health, opts);
+    },
+    listActiveWork: async (opts) => {
+      calls.push({ method: "listActiveWork", opts });
+      return answer(active, opts);
+    },
+    findLinkedUretIds: async (type, relation, pageId, opts) => {
+      calls.push({ method: "findLinkedUretIds", type, relation, pageId, opts });
+      return answer(linked, pageId, opts);
+    },
+    countEvidenceForWP: async (pageId, opts) => {
+      calls.push({ method: "countEvidenceForWP", pageId, opts });
+      return answer(evidence, pageId, opts);
     },
   };
 }
@@ -142,9 +155,9 @@ test("/status without Notion configuration says only NOT OK", async () => {
 
 test("/status shows counts, the integrity message or the incomplete message", async () => {
   const cases = [
-    [{ outcome: "counts", total: 4, counts: { Idea: 1, Active: 1, Parked: 1, Done: 1 } }, "Notion: Connected\nTotal: 4\nIdea: 1\nActive: 1\nParked: 1\nDone: 1", undefined],
-    [{ outcome: "data_integrity", total: 3, counts: { Idea: 2 } }, opp.STATUS_INTEGRITY_TEXT, "notion_data_integrity"],
-    [{ outcome: "incomplete", total: 1000, counts: { Idea: 1000 } }, opp.STATUS_INCOMPLETE_TEXT, undefined],
+    [{ outcome: "counts", total: 4, counts: { Idea: 1, Active: 1, Parked: 1, Done: 1 } }, "Notion: Connected\nTotal: 4\nIdea: 1\nActive: 1\nParked: 1\nDone: 1\n\nActive work: None", undefined],
+    [{ outcome: "data_integrity", total: 3, counts: { Idea: 2 } }, `${opp.STATUS_INTEGRITY_TEXT}\n\nActive work: None`, "notion_data_integrity"],
+    [{ outcome: "incomplete", total: 1000, counts: { Idea: 1000 } }, `${opp.STATUS_INCOMPLETE_TEXT}\n\nActive work: None`, undefined],
   ];
   for (const [result, reply, label] of cases) {
     const notion = fakeNotion({ count: result });
@@ -153,8 +166,8 @@ test("/status shows counts, the integrity message or the incomplete message", as
     const out = await router.route({ text: "/status", chatId: 1, signal });
     assert.strictEqual(out.reply, reply);
     assert.strictEqual(out.label, label);
-    assert.strictEqual(notion.calls.length, 1);
-    assert.strictEqual(notion.calls[0].opts.signal, signal, "stop signal not passed to the read");
+    assert.deepStrictEqual(notion.calls.map((c) => c.method), ["countByStatus", "listActiveWork"]);
+    for (const call of notion.calls) assert.strictEqual(call.opts.signal, signal, "stop signal not passed to the read");
   }
 });
 

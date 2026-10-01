@@ -23,7 +23,7 @@ const COMMAND_LIST = [
   "/start - introduction",
   "/help - list commands",
   "/cancel - cancel the current interaction",
-  "/status - Opportunity counts (read-only)",
+  "/status - Opportunity counts and active work (read-only)",
   "/show <URET-ID> - one Opportunity, Spec or Work Package (read-only)",
   "/health - health check",
   "/new_opportunity - create an Opportunity (guided)",
@@ -105,6 +105,18 @@ function createRouter({ sessions, configStatus, logDir, notion = null, writer = 
     }
   }
 
+  // Active Work Packages with each one's Spec (by URET ID) and evidence count.
+  async function activeWork(signal) {
+    const { items, more } = await notion.listActiveWork({ signal });
+    const out = [];
+    for (const item of items) {
+      const spec = await notion.findLinkedUretIds("spec", "Work packages", item.pageId, { signal });
+      const evidence = await notion.countEvidenceForWP(item.pageId, { signal });
+      out.push({ uretId: item.uretId, title: item.title, spec, evidence });
+    }
+    return { items: out, more };
+  }
+
   async function startFlow(command, chatId, args, signal) {
     if (!flows.ready) return { reply: NOT_CONFIGURED_TEXT, label: "notion_not_configured" };
     const result = await read(() => flows.start(chatId, command, args, signal));
@@ -122,8 +134,12 @@ function createRouter({ sessions, configStatus, logDir, notion = null, writer = 
       if (!notion) return { reply: NOT_CONFIGURED_TEXT, label: "notion_not_configured" };
       const result = await read(() => notion.countByStatus({ signal }));
       if (result.reply) return result;
-      const label = result.value.outcome === "data_integrity" ? "notion_data_integrity" : undefined;
-      return { reply: opp.buildStatusReply(result.value), label };
+      const countLabel = result.value.outcome === "data_integrity" ? "notion_data_integrity" : undefined;
+      // Active work follows whatever the counts showed; if it cannot be read,
+      // the counts still stand and the section says so.
+      const active = await read(() => activeWork(signal));
+      const section = active.reply ? opp.ACTIVE_WORK_UNAVAILABLE : opp.buildActiveWorkSection(active.value);
+      return { reply: `${opp.buildStatusReply(result.value)}\n\n${section}`, label: countLabel || active.label };
     },
     show: async ({ args, signal }) => {
       if (!args) return { reply: opp.SHOW_USAGE };

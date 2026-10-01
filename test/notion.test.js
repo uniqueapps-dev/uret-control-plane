@@ -618,7 +618,7 @@ test("the guard really blocks anything outside the allow-list", () => {
 
 test("the adapter exposes no write operation", () => {
   const reader = fakeWorkspace().reader;
-  assert.deepStrictEqual(Object.keys(reader).sort(), ["countByStatus", "countEvidenceForSpec", "countEvidenceForWP", "findByUretId", "findLinkedUretIds", "getDataSourceId", "hasCachedSource", "health"]);
+  assert.deepStrictEqual(Object.keys(reader).sort(), ["countByStatus", "countEvidenceForSpec", "countEvidenceForWP", "findByUretId", "findLinkedUretIds", "getDataSourceId", "hasCachedSource", "health", "listActiveWork"]);
 });
 
 // --- Phase 3-5 step 1: all five URET data sources -----------------------------------
@@ -981,4 +981,62 @@ test("evidence counts never call anything but the four permitted reads", async (
   const ws = multiWorkspace({ query: { wp: () => ({ results: [pageItem()], has_more: false }) } });
   await ws.reader.countEvidenceForSpec(fakePageId());
   assert.deepStrictEqual([...new Set(ws.calls.map((c) => c.method))].sort(), ["blocks.children.list", "dataSources.query", "dataSources.retrieve", "databases.retrieve"]);
+});
+
+// --- Phase 4 step 5: active work for /status ---------------------------------------------
+
+const wpItem = (uretId, title, extra = {}) => ({
+  object: "page",
+  id: fakePageId(),
+  in_trash: false,
+  properties: { "URET ID": { type: "rich_text", rich_text: rt(uretId) }, Name: { type: "title", title: rt(title) } },
+  ...extra,
+});
+
+test("listActiveWork asks for In progress or Draft, newest edit first, at most 5", async () => {
+  const ws = multiWorkspace();
+  await ws.reader.listActiveWork();
+  const queries = ws.calls.filter((c) => c.method === "dataSources.query");
+  assert.strictEqual(queries.length, 1);
+  assert.strictEqual(ws.typeOfQuery(queries[0]), "wp");
+  const { filter, sorts, page_size: pageSize } = queries[0].args;
+  assert.deepStrictEqual(filter, { or: [{ property: "Status", select: { equals: "In progress" } }, { property: "Status", select: { equals: "Draft" } }] });
+  assert.deepStrictEqual(sorts, [{ timestamp: "last_edited_time", direction: "descending" }]);
+  assert.strictEqual(pageSize, 5);
+  assert.deepStrictEqual(notion.ACTIVE_WORK_STATUSES, ["In progress", "Draft"]);
+  assert.strictEqual(notion.MAX_ACTIVE_WORK, 5);
+});
+
+test("listActiveWork keeps Notion's order, skips trashed pages, and reports more", async () => {
+  const a = wpItem("WP-003", "Newest");
+  const b = wpItem("WP-002", "Older");
+  const ws = multiWorkspace({ query: { wp: () => ({ results: [a, wpItem("WP-009", "Gone", { in_trash: true }), b, { object: "data_source" }], has_more: true }) } });
+  assert.deepStrictEqual(await ws.reader.listActiveWork(), {
+    items: [{ uretId: "WP-003", title: "Newest", pageId: a.id }, { uretId: "WP-002", title: "Older", pageId: b.id }],
+    more: true,
+  });
+});
+
+test("listActiveWork: missing URET ID or Name come back empty; no active work is an empty list", async () => {
+  const bare = { object: "page", id: fakePageId(), in_trash: false, properties: {} };
+  const ws = multiWorkspace({ query: { wp: () => ({ results: [bare], has_more: false }) } });
+  assert.deepStrictEqual(await ws.reader.listActiveWork(), { items: [{ uretId: "", title: "", pageId: bare.id }], more: false });
+  const none = multiWorkspace();
+  assert.deepStrictEqual(await none.reader.listActiveWork(), { items: [], more: false });
+});
+
+test("listActiveWork refuses an invalid Work Packages schema and labels Notion errors", async () => {
+  const props = schemaFor("wp");
+  delete props.Status;
+  const bad = multiWorkspace({ properties: { wp: props } });
+  await rejectsWith(bad.reader.listActiveWork(), "notion_schema_invalid");
+  assert.strictEqual(bad.count("dataSources.query"), 0);
+  const failing = multiWorkspace({
+    query: {
+      wp: () => {
+        throw new RequestTimeoutError();
+      },
+    },
+  });
+  await rejectsWith(failing.reader.listActiveWork(), "notion_timeout");
 });

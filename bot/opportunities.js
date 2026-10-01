@@ -206,6 +206,27 @@ const duplicateText = (id) => ["Notion: Data integrity problem", `Duplicate URET
  *   { outcome: "data_integrity" }  -> fixed integrity text, no counts
  *   { outcome: "incomplete" }      -> fixed incomplete text, no counts
  */
+// An evidence count: "3", or "1000+" when the count was cut short.
+const evidenceText = (evidence) => `${(evidence && evidence.count) || 0}${evidence && evidence.incomplete ? "+" : ""}`;
+
+const ACTIVE_WORK_UNAVAILABLE = "Active work: unavailable";
+
+/**
+ * The /status "Active work" section. `active` = { items, more }, each item
+ * { uretId, title, spec: { uretIds, more }, evidence: { count, incomplete } },
+ * already in display order (most recently edited first).
+ */
+function buildActiveWorkSection(active) {
+  const items = (active && active.items) || [];
+  if (items.length === 0) return "Active work: None";
+  const lines = ["Active work:"];
+  for (const item of items) {
+    lines.push(`• ${formatText(item.uretId)} — ${formatText(item.title)}`, `  Spec: ${linkedText(item.spec)}`, `  Evidence: ${evidenceText(item.evidence)}`);
+  }
+  if (active.more) lines.push("More active work in Notion.");
+  return lines.join("\n");
+}
+
 function buildStatusReply(result) {
   if (result && result.outcome === "data_integrity") return STATUS_INTEGRITY_TEXT;
   if (result && result.outcome === "incomplete") return STATUS_INCOMPLETE_TEXT;
@@ -237,6 +258,9 @@ module.exports = {
   linkLine,
   buildShowReply,
   buildStatusReply,
+  buildActiveWorkSection,
+  evidenceText,
+  ACTIVE_WORK_UNAVAILABLE,
   notFoundText,
   duplicateText,
 };

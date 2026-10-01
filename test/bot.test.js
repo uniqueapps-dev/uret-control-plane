@@ -394,13 +394,18 @@ test("/status, /show and /health work end to end through the real read-only adap
   });
   const ctx = await runCommands(t, ["/status", "/show opp-1", "/health"], { notion: n.reader, secrets: n.secrets });
   const replies = ctx.sent().map((c) => c.body.text);
-  assert.strictEqual(replies[0], "Notion: Connected\nTotal: 3\nIdea: 2\nActive: 0\nParked: 0\nDone: 1");
+  // This workspace has only Opportunities: the counts stand and active work is
+  // reported unavailable (Phase 4), without any error detail.
+  assert.strictEqual(replies[0], "Notion: Connected\nTotal: 3\nIdea: 2\nActive: 0\nParked: 0\nDone: 1\n\nActive work: unavailable");
   assert.match(replies[1], /^URET ID: OPP-001\nName: URET Control Plane Setup\nStatus: Active\n/);
   assert.match(replies[1], /Notion link: https:\/\/www\.notion\.so\/example$/);
   assert.match(replies[2], /Notion configuration: OK\nNotion reachable: OK\nOpportunities source: OK\nOpportunities schema: OK/);
-  assert.strictEqual(n.calls.filter((c) => c === "blocks.children.list").length, 1, "discovery not remembered");
+  // One listing finds Opportunities (then remembered by /show and /health), one
+  // is /status's Work Packages attempt; without remembering it would be four.
+  assert.strictEqual(n.calls.filter((c) => c === "blocks.children.list").length, 2, "discovery not remembered");
   const lookup = ctx.logRecords().filter((r) => r.event === "command").map((r) => [r.command, r.result]);
-  assert.deepStrictEqual(lookup, [["status", "ok"], ["show", "ok"], ["health", "ok"]]);
+  assert.deepStrictEqual(lookup, [["status", "error"], ["show", "ok"], ["health", "ok"]]);
+  assert.strictEqual(ctx.logRecords().find((r) => r.command === "status").error_class, "notion_source_not_found");
 });
 
 test("unauthorized /status never reaches the Notion adapter", async (t) => {
