@@ -1,8 +1,8 @@
 "use strict";
 
 /**
- * Guided creation flows: /new_opportunity, /new_spec <OPP-ID> and
- * /new_work <SPEC-ID>.
+ * Guided creation flows: /new_opportunity, /new_spec <OPP-ID>,
+ * /new_work <SPEC-ID> and /new_evidence <WP-ID>.
  *
  * A flow with a parent (a Spec's Opportunity, a Work Package's Spec) first checks that the parent
  * exists exactly once in Notion; otherwise no session starts. It then asks
@@ -30,6 +30,11 @@ const WORK_TYPES = ["Prototype", "Feature", "Bug fix", "Research", "Hardening"];
 // Worker options as named in Notion. "Emmanuel" is accepted for "Manual".
 const WORKERS = ["Claude Code", "Manual"];
 const WORKER_ALIASES = { emmanuel: "Manual" };
+const EVIDENCE_TYPES = ["Observation", "Test results", "Research", "User feedback", "Metrics"];
+const VERDICTS = ["Pass", "Fail", "Mixed", "N/A"];
+const MAX_EVIDENCE_SUMMARY = 500;
+const MAX_EVIDENCE_DETAILS = 2000;
+const MAX_NEXT_ACTION = 500;
 
 const ACTIVE_SESSION_TEXT = "You already have an active session. Finish it or use /cancel.";
 const TEXT_ONLY_TEXT = "Please answer with text.";
@@ -97,6 +102,23 @@ function freeText(text) {
 }
 
 const numbered = (options) => options.map((o, i) => `${i + 1}. ${o}`).join("\n");
+// A required answer (no "-" to skip), at most `max` characters; may span lines.
+function requiredText(max) {
+  return (text) => {
+    const value = text.trim();
+    if (value === "") return { error: "Please answer; this question cannot be left empty." };
+    if (Array.from(value).length > max) return { error: `Too long (max ${max} characters).` };
+    return { value };
+  };
+}
+
+/**
+ * Evidence keeps its details and next action in Summary, as labelled sections
+ * (no extra properties, no page body):
+ *   <summary>\n\nDetails:\n<details>\n\nNext action:\n<next action>
+ */
+const structuredSummary = (a) => `${a.summary}\n\nDetails:\n${a.details}\n\nNext action:\n${a.nextAction}`;
+
 const free = (label) => ({ prompt: `${label}? (send ${SKIP} to leave empty)`, validate: freeText, label });
 
 /**
@@ -199,6 +221,38 @@ const FLOWS = {
         "Stored in URET – Work Packages.",
       ].join("\n"),
   },
+  new_evidence: {
+    type: "evd",
+    name: (parentId) => `New Evidence for ${parentId}`,
+    parent: {
+      type: "wp",
+      prefix: "WP",
+      label: "Work package",
+      pageKey: "wpPageId",
+      usage: "Usage: /new_evidence <WP-ID>\nExample: /new_evidence WP-001",
+      invalid: "Invalid Work package ID. Example: /new_evidence WP-001",
+    },
+    questions: [
+      { key: "type", label: "Type", prompt: `Type? Reply with a number:\n${numbered(EVIDENCE_TYPES)}`, validate: choice(EVIDENCE_TYPES, "type") },
+      { key: "summary", label: "Summary", prompt: `Summary? (max ${MAX_EVIDENCE_SUMMARY} characters)`, validate: requiredText(MAX_EVIDENCE_SUMMARY) },
+      { key: "verdict", label: "Verdict", prompt: `Verdict? Reply with a number:\n${numbered(VERDICTS)}`, validate: choice(VERDICTS, "verdict") },
+      { key: "details", label: "Details", prompt: `Details? (max ${MAX_EVIDENCE_DETAILS} characters)`, validate: requiredText(MAX_EVIDENCE_DETAILS) },
+      { key: "nextAction", label: "Next action", prompt: `Next action? (max ${MAX_NEXT_ACTION} characters)`, validate: requiredText(MAX_NEXT_ACTION) },
+    ],
+    // The record's Name is the summary on one line; Summary holds all three texts.
+    toRecord: (a) => ({ title: a.summary.replace(/\s+/g, " "), type: a.type, verdict: a.verdict, summary: structuredSummary(a) }),
+    confirmation: (uretId, a, parentId) =>
+      [
+        `Created ${uretId}`,
+        "",
+        `Type: ${formatText(a.type)}`,
+        `Verdict: ${formatText(a.verdict)}`,
+        `Work package: ${parentId}`,
+        `Summary: ${formatText(a.summary)}`,
+        "",
+        "Stored in URET – Evidence.",
+      ].join("\n"),
+  },
 };
 
 const parentNotFoundText = (parent, id) => `${parent.label} ${id} not found.`;
@@ -267,7 +321,7 @@ function createCaptureFlows({ capture, reader, writer, reserveId }) {
 
   async function create(flow, answers, parentId, signal) {
     if (!ready) return { reply: CREATE_ERROR_TEXT.notion_unauthorized, label: "notion_not_configured" };
-    const record = { ...answers };
+    const record = flow.toRecord ? flow.toRecord(answers) : { ...answers };
     if (flow.parent) {
       let parent;
       try {
@@ -308,6 +362,8 @@ module.exports = {
   ASSET_TYPES,
   WORK_TYPES,
   WORKERS,
+  EVIDENCE_TYPES,
+  VERDICTS,
   MAX_TITLE,
   MAX_ANSWER,
   ACTIVE_SESSION_TEXT,

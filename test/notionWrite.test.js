@@ -7,7 +7,7 @@ const { APIResponseError, RequestTimeoutError, UnknownHTTPResponseError, Client 
 const nw = require("../bot/notionWrite");
 const { fakeNotionToken, fakePageId, dashedId } = require("./helpers");
 
-const TITLES = { opp: "URET – Opportunities", spec: "URET – Specs", wp: "URET – Work Packages" };
+const TITLES = { opp: "URET – Opportunities", spec: "URET – Specs", wp: "URET – Work Packages", evd: "URET – Evidence" };
 
 // --- Fake Notion ------------------------------------------------------------------
 
@@ -36,6 +36,18 @@ const ASSET_TYPES = ["App/PWA", "Ebook", "Video series", "Landing page / site", 
 
 function properties(type) {
   const common = { "URET ID": text(), Name: { type: "title", title: {} } };
+  if (type === "evd") {
+    // As created by the setup script: no Status.
+    return {
+      ...common,
+      "Work package": relation(),
+      Type: select(["Test results", "User feedback", "Research", "Metrics", "Observation"]),
+      Summary: text(),
+      Verdict: select(["Pass", "Fail", "Mixed", "N/A"]),
+      "Evidence link": { type: "url", url: {} },
+      Date: { type: "date", date: {} },
+    };
+  }
   if (type === "opp") {
     return {
       ...common,
@@ -140,6 +152,14 @@ const RECORDS = {
     scopeOut: "Sync",
     constraints: "Offline",
     opportunityPageId: dashedId(fakePageId()),
+  }),
+  evd: () => ({
+    uretId: "EVD-002",
+    title: "Prototype works on the phone",
+    type: "Test results",
+    verdict: "Pass",
+    summary: "Prototype works on the phone\n\nDetails:\nLogging is clear.\n\nNext action:\nAdd a service card.",
+    wpPageId: dashedId(fakePageId()),
   }),
   wp: () => ({
     uretId: "WP-001",
@@ -292,9 +312,9 @@ test("invalid records are refused before any Notion call", async () => {
   }
 });
 
-test("unknown record types are refused (Evidence and Releases are not creatable)", async () => {
+test("unknown record types are refused (Releases are not creatable)", async () => {
   const n = fakeNotion("opp");
-  for (const type of ["evd", "rel", "OPP", "__proto__", "constructor", undefined]) {
+  for (const type of ["rel", "EVD", "OPP", "__proto__", "constructor", undefined]) {
     await assert.rejects(n.writer.createRecord(type, RECORDS.opp()), TypeError);
   }
   assert.strictEqual(n.calls.length, 0);
@@ -686,4 +706,63 @@ test("a successful update returns only the status", async () => {
   const n = statusNotion("wp");
   const out = await n.writer.updateStatus("wp", n.page(), "Blocked");
   assert.deepStrictEqual(out, { status: "Blocked" });
+});
+
+// --- Phase 4 step 3: Evidence creates -----------------------------------------------------
+
+test("creating Evidence: linked to the Work Package, Type and Verdict set, no Status written", async () => {
+  const n = fakeNotion("evd");
+  const record = RECORDS.evd();
+  assert.deepStrictEqual(await n.writer.createRecord("evd", record), { uretId: "EVD-002" });
+  assert.deepStrictEqual(n.calls.map((c) => c.method), ["dataSources.retrieve", "pages.create"]);
+  const props = n.calls[1].args.properties;
+  assert.deepStrictEqual(Object.keys(props).sort(), ["Name", "Summary", "Type", "URET ID", "Verdict", "Work package"]);
+  assert.strictEqual(props.Status, undefined);
+  assert.deepStrictEqual(props.Type, { select: { name: "Test results" } });
+  assert.deepStrictEqual(props.Verdict, { select: { name: "Pass" } });
+  assert.deepStrictEqual(props["Work package"], { relation: [{ id: record.wpPageId }] });
+  assert.strictEqual(props.Summary.rich_text.map((t) => t.text.content).join(""), record.summary);
+  assert.deepStrictEqual(props.Name, { title: [{ type: "text", text: { content: "Prototype works on the phone" } }] });
+});
+
+test("an Evidence source does not need a Status property", async () => {
+  const n = fakeNotion("evd");
+  assert.deepStrictEqual(nw.verifyWriteSchema(n.dataSource, "evd", RECORDS.evd(), n.root), []);
+});
+
+test("Evidence schema problems stop the write", async () => {
+  const drop = (name) => (p) => {
+    const copy = { ...p };
+    delete copy[name];
+    return copy;
+  };
+  const cases = [
+    drop("Work package"),
+    drop("Summary"),
+    (p) => ({ ...p, Verdict: select(["Fail", "Mixed", "N/A"]) }),
+    (p) => ({ ...p, Type: select(["Observation"]) }),
+    (p) => ({ ...p, Verdict: text() }),
+  ];
+  for (const change of cases) {
+    const n = fakeNotion("evd");
+    n.dataSource.properties = change(n.dataSource.properties);
+    await rejectsWith(n.writer.createRecord("evd", RECORDS.evd()), "notion_schema_invalid");
+    assert.strictEqual(n.count("pages.create"), 0);
+  }
+});
+
+test("invalid Evidence records are refused before any Notion call", async () => {
+  const cases = [
+    { ...RECORDS.evd(), uretId: "WP-002" },
+    { ...RECORDS.evd(), wpPageId: undefined },
+    { ...RECORDS.evd(), wpPageId: "WP-002" },
+    { ...RECORDS.evd(), verdict: "" },
+    { ...RECORDS.evd(), type: " " },
+    { ...RECORDS.evd(), title: "" },
+  ];
+  for (const record of cases) {
+    const n = fakeNotion("evd");
+    await rejectsWith(n.writer.createRecord("evd", record), "notion_write_failed");
+    assert.strictEqual(n.calls.length, 0);
+  }
 });

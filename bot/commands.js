@@ -2,7 +2,7 @@
 
 /**
  * Command router. /start, /help, /cancel, /status, /show, /health,
- * /new_opportunity, /new_spec and /new_work do something. Plain text answers an active capture
+ * /new_opportunity, /new_spec, /new_work and /new_evidence do something. Plain text answers an active capture
  * session (see captureFlows.js); any other input gets a pointer to /help.
  *
  * Handlers are asynchronous and always awaited. /status, /show and /health
@@ -27,6 +27,7 @@ const COMMAND_LIST = [
   "/new_opportunity - create an Opportunity (guided)",
   "/new_spec <OPP-ID> - create a Spec for an Opportunity (guided)",
   "/new_work <SPEC-ID> - create a Work Package for a Spec (guided)",
+  "/new_evidence <WP-ID> - record Evidence for a Work Package (guided)",
 ].join("\n");
 
 const START_TEXT = [
@@ -37,7 +38,7 @@ const START_TEXT = [
   "Available commands:",
   COMMAND_LIST,
   "",
-  "It can create new Opportunities, Specs and Work Packages through guided questions.",
+  "It can create new Opportunities, Specs, Work Packages and Evidence through guided questions.",
   "It never changes or deletes existing URET records.",
 ].join("\n");
 
@@ -153,6 +154,7 @@ function createRouter({ sessions, configStatus, logDir, notion = null, writer = 
     new_opportunity: async ({ chatId, signal }) => startFlow("new_opportunity", chatId, "", signal),
     new_spec: async ({ chatId, args, signal }) => startFlow("new_spec", chatId, args, signal),
     new_work: async ({ chatId, args, signal }) => startFlow("new_work", chatId, args, signal),
+    new_evidence: async ({ chatId, args, signal }) => startFlow("new_evidence", chatId, args, signal),
   };
 
   /**

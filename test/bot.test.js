@@ -554,6 +554,7 @@ const CREATION_RUNS = [
   { command: "new_opportunity", start: "/new_opportunity", answers: ["Secret title words", "2", "Project zeta", "Problem omega", "Users kappa", "Metrics sigma", "Action lambda"], created: "OPP-042" },
   { command: "new_spec", start: "/new_spec OPP-017", answers: ["Spec title alpha", "v9.9-beta", "Summary gamma", "Scope delta", "Out epsilon", "Constraint eta"], created: "SPEC-042" },
   { command: "new_work", start: "/new_work SPEC-017", answers: ["Work title theta", "3", "Emmanuel", "Summary iota", "Instructions mu", "Outputs nu"], created: "WP-042" },
+  { command: "new_evidence", start: "/new_evidence WP-017", answers: ["2", "Summary rho", "1", "Details tau\nline two", "Next upsilon"], created: "EVD-042" },
 ];
 
 for (const run of CREATION_RUNS) {

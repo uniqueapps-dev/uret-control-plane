@@ -16,8 +16,8 @@
 //   .update( / .delete( on anything but a Map/Set created in the same file.
 //
 // Scope
-// - URET data source titles only in the two adapters (Evidence and Releases
-//   only in the read adapter), plus the three locked "Stored in ..." lines;
+// - URET data source titles only in the two adapters (Releases only in the
+//   read adapter), plus the four locked "Stored in ..." lines;
 // - the counter file is named only in bot/idCounter.js and test/helpers.js;
 //   the setup script is never used; tests always use temporary counter files
 //   and install the real-counter guard;
@@ -76,10 +76,15 @@ const NOTION_FREE_FILES = ["auth.js", "session.js", "telegram.js"];
 
 const TITLE = (names) => new RegExp(`URET\\s*[‐-―-]\\s*(?:${names})\\b`);
 const ANY_TITLE = TITLE("Opportunities|Specs|Work Packages|Evidence|Releases");
-const NOT_CREATABLE_TITLE = TITLE("Evidence|Releases");
+const NOT_CREATABLE_TITLE = TITLE("Releases");
 // The locked confirmation lines are the only titles outside the adapters.
 const CONFIRMATION_FILE = "captureFlows.js";
-const CONFIRMATION_LINES = ['"Stored in URET – Opportunities.",', '"Stored in URET – Specs.",', '"Stored in URET – Work Packages.",'];
+const CONFIRMATION_LINES = [
+  '"Stored in URET – Opportunities.",',
+  '"Stored in URET – Specs.",',
+  '"Stored in URET – Work Packages.",',
+  '"Stored in URET – Evidence.",',
+];
 
 const COUNTER_STEM = path.basename(REAL_COUNTER_FILE, ".json");
 const COUNTER_FILES = { bot: "idCounter.js", test: "helpers.js" };

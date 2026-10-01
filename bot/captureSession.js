@@ -22,8 +22,9 @@ const FIELDS = {
   new_opportunity: ["title", "assetType", "project", "problemSummary", "targetUsers", "successMetrics", "nextAction"],
   new_spec: ["title", "version", "summary", "scopeIn", "scopeOut", "constraints"],
   new_work: ["title", "type", "worker", "summary", "instructions", "outputs"],
+  new_evidence: ["type", "summary", "verdict", "details", "nextAction"],
 };
-const PARENT_PREFIX = { new_opportunity: null, new_spec: "OPP", new_work: "SPEC" };
+const PARENT_PREFIX = { new_opportunity: null, new_spec: "OPP", new_work: "SPEC", new_evidence: "WP" };
 
 const CANCELLED_TEXT = "Cancelled. No record created.";
 const NO_SESSION_TEXT = "No active session to cancel.";

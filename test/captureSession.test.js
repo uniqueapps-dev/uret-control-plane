@@ -29,11 +29,13 @@ test("the timeout is 30 minutes", () => {
 });
 
 test("question fields follow the locked design", () => {
-  assert.deepStrictEqual(Object.keys(cs.FIELDS), ["new_opportunity", "new_spec", "new_work"]);
+  assert.deepStrictEqual(Object.keys(cs.FIELDS), ["new_opportunity", "new_spec", "new_work", "new_evidence"]);
   assert.strictEqual(cs.FIELDS.new_opportunity.length, 7);
   assert.strictEqual(cs.FIELDS.new_spec.length, 6);
   assert.strictEqual(cs.FIELDS.new_work.length, 6);
-  for (const fields of Object.values(cs.FIELDS)) assert.strictEqual(fields[0], "title");
+  for (const command of ["new_opportunity", "new_spec", "new_work"]) assert.strictEqual(cs.FIELDS[command][0], "title");
+  // Phase 4: Evidence has no title question; its order is locked separately.
+  assert.deepStrictEqual(cs.FIELDS.new_evidence, ["type", "summary", "verdict", "details", "nextAction"]);
 });
 
 test("createSession returns the documented structure", () => {

@@ -1,8 +1,9 @@
 "use strict";
 
 /**
- * Notion write adapter: creates new Opportunity, Spec and Work Package records
- * and changes the Status of existing ones.
+ * Notion write adapter: creates new Opportunity, Spec, Work Package and
+ * Evidence records, and changes the Status of existing Opportunities, Specs
+ * and Work Packages.
  *
  * This is the only bot module that writes to Notion. It makes two writes:
  * pages.create, and pages.update with the Status property only. It also calls
@@ -31,8 +32,9 @@ const TEXT_CHUNK = 2000;
 const MAX_CHUNKS = 100;
 
 // What each creatable type writes: data source title, URET ID prefix, fixed
-// initial Status, and each answer's property (in capture order), with the
-// Notion type it must have. `relation` is the parent link, if any.
+// initial Status (null: the type has no Status, as for Evidence), and each
+// answer's property (in capture order), with the Notion type it must have.
+// `relation` is the parent link, if any.
 const TARGETS = {
   opp: {
     title: "URET – Opportunities",
@@ -72,6 +74,17 @@ const TARGETS = {
       summary: ["Summary", "rich_text"],
       instructions: ["Instructions", "rich_text"],
       outputs: ["Outputs", "rich_text"],
+    },
+  },
+  evd: {
+    title: "URET – Evidence",
+    prefix: "EVD",
+    status: null,
+    relation: ["wpPageId", "Work package"],
+    fields: {
+      type: ["Type", "select"],
+      verdict: ["Verdict", "select"],
+      summary: ["Summary", "rich_text"],
     },
   },
 };
@@ -195,7 +208,7 @@ function verifyWriteSchema(dataSource, type, record, rootPageId) {
   const expected = [
     ["URET ID", "rich_text"],
     ["Name", "title"],
-    ["Status", "select"],
+    ...(target.status ? [["Status", "select"]] : []),
     ...Object.values(target.fields),
     ...(target.relation ? [[target.relation[1], "relation"]] : []),
   ];
@@ -205,7 +218,7 @@ function verifyWriteSchema(dataSource, type, record, rootPageId) {
     else if (prop.type !== kind) problems.push(`type:${name}`);
   }
   if (problems.length > 0) return problems;
-  if (!optionNames(properties.Status, "select").has(target.status)) problems.push("option:Status");
+  if (target.status && !optionNames(properties.Status, "select").has(target.status)) problems.push("option:Status");
   for (const [key, [name, kind]] of Object.entries(target.fields)) {
     if (kind !== "rich_text" && !optionNames(properties[name], kind).has(record[key])) problems.push(`option:${name}`);
   }
@@ -216,8 +229,8 @@ function buildProperties(target, record) {
   const properties = {
     Name: { title: richText(record.title) },
     "URET ID": { rich_text: richText(record.uretId) },
-    Status: { select: { name: target.status } },
   };
+  if (target.status) properties.Status = { select: { name: target.status } };
   for (const [key, [name, kind]] of Object.entries(target.fields)) {
     if (kind === "rich_text") properties[name] = { rich_text: richText(record[key]) };
     else if (kind === "select") properties[name] = { select: { name: record[key] } };
@@ -260,9 +273,9 @@ function createNotionWriter({ client, rootPageId, resolveDataSource }) {
   }
 
   /**
-   * Creates one record of type "opp", "spec" or "wp". `record` holds the URET
-   * ID, the title and the capture answers (plus the parent page ID for Specs
-   * and Work Packages). Returns { uretId } only.
+   * Creates one record of type "opp", "spec", "wp" or "evd". `record` holds the
+   * URET ID, the title and the capture answers (plus the parent page ID for
+   * Specs, Work Packages and Evidence). Returns { uretId } only.
    */
   async function createRecord(type, record, { signal } = {}) {
     if (!Object.prototype.hasOwnProperty.call(TARGETS, type)) throw new TypeError("unknown record type");
