@@ -5,10 +5,11 @@
  * URET Control Bot MVP v0.1 — entry point.
  *
  * Telegram long polling -> authorization -> command router. When Notion is
- * configured, /status, /show and /health read URET Opportunities through the
- * read-only adapter, and /new_opportunity, /new_spec and /new_work create new
- * records through the write adapter (pages.create only). Existing records are never
- * changed.
+ * configured, /status, /show and /health read URET records through the
+ * read-only adapter; /new_opportunity, /new_spec, /new_work and /new_evidence
+ * create new records, and /update_status changes the Status of an existing one,
+ * through the write adapter (pages.create, and pages.update for Status only).
+ * Nothing is ever deleted and no other field of an existing record is changed.
  *
  * Usage (Termux):
  *   set -a; . ./.env; set +a; npm run start:bot

@@ -4,8 +4,8 @@
  * Read-only Notion adapter for the five URET data sources under the root page:
  * Opportunities, Specs, Work Packages, Evidence and Releases.
  *
- * This is the only bot module that loads @notionhq/client. It calls only four
- * read operations:
+ * Together with the write adapter (bot/notionWrite.js), this is the only bot
+ * module that loads @notionhq/client. It calls only four read operations:
  *   blocks.children.list, databases.retrieve, dataSources.retrieve, dataSources.query
  * It never creates, updates, deletes, appends or moves anything, never calls
  * any page API, search or client.request, and never retries.

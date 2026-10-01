@@ -598,3 +598,52 @@ for (const run of CREATION_RUNS) {
     }
   });
 }
+
+// Phase 4: /update_status through the whole bot. The log holds only the
+// command name, the result and fixed labels: never the ID, the status, a page
+// ID or the user ID.
+test("/update_status through the bot logs only the command name and fixed labels", async (t) => {
+  const { createRouter } = require("../bot/commands");
+  const pageId = fakePageId();
+  const updates = [];
+  const router = createRouter({
+    sessions: createSessionStore(),
+    configStatus: { TELEGRAM_BOT_TOKEN: "valid", TELEGRAM_ALLOWED_USER_ID: "valid" },
+    logDir: tempDir(),
+    notion: {
+      findByUretId: async () => ({ result: "found", trashed: false, page: { id: pageId, properties: { Status: { type: "select", select: { name: "Idea" } } } } }),
+    },
+    writer: {
+      updateStatus: async (type, page, status) => {
+        updates.push([type, page.id, status]);
+        // Setting Done is the update whose outcome Notion does not confirm.
+        if (status === "Done") throw Object.assign(new Error("x"), { label: "notion_unavailable", uncertain: true });
+        return { status };
+      },
+    },
+    reserveId: async () => "OPP-099",
+  });
+  const texts = ["/update_status OPP-042 Parked", "/update_status OPP-042 Idea", "/update_status OPP-042 Banana", "/update_status OPP-042 Done"];
+  const ctx = setup(t, { router, getUpdatesResponses: [ok([]), ok(texts.map((text, i) => message({ updateId: 80 + i, text })))] });
+  const running = ctx.bot.start();
+  await waitFor(() => ctx.sent().length >= texts.length);
+  await ctx.bot.stop();
+  await running;
+
+  assert.deepStrictEqual(ctx.sent().map((c) => c.body.text), [
+    "Updated OPP-042 status to Parked.",
+    "OPP-042 is already Idea.",
+    "Invalid status. Use one of: Idea, Active, Parked, Done.",
+    "Notion did not confirm the update. Check with /show OPP-042.",
+  ]);
+  assert.deepStrictEqual(updates.map((u) => u[2]), ["Parked", "Done"]);
+  const commands = ctx.logRecords().filter((r) => r.event === "command");
+  assert.deepStrictEqual(
+    commands.map((r) => [r.command, r.result, r.error_class]),
+    [["update_status", "ok", undefined], ["update_status", "ok", undefined], ["update_status", "ok", undefined], ["update_status", "error", "notion_update_unconfirmed"]]
+  );
+  const everything = ctx.logText() + ctx.out.text();
+  for (const secretish of ["OPP-042", "Parked", "Banana", pageId, dashedId(pageId), String(AUTHORIZED_ID)]) {
+    assert.ok(!everything.includes(secretish), `log contains ${secretish}`);
+  }
+});

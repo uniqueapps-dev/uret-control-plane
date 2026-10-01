@@ -246,7 +246,7 @@ test("guard self-test: comments are ignored for code rules but URLs survive", ()
 
 test("bot sources exist", () => {
   assert.ok(sources.length >= 14);
-  for (const file of [...ADAPTERS, "idCounter.js", "captureFlows.js", "captureSession.js", "index.js"]) assert.ok(source(file), file);
+  for (const file of [...ADAPTERS, "idCounter.js", "captureFlows.js", "captureSession.js", "statusUpdate.js", "index.js"]) assert.ok(source(file), file);
 });
 
 test("only the two adapters load the Notion SDK; only index.js loads the adapters and the ID counter", () => {

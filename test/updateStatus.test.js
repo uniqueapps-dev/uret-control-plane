@@ -317,3 +317,13 @@ test("logged fields carry only the command name and fixed labels", async () => {
   assert.strictEqual(out.command, "update_status");
   assert.doesNotMatch(`${out.command} ${out.label}`, /OPP-002|Active/);
 });
+
+test("an abort (shutdown) during the lookup is passed on; nothing is written", async () => {
+  const h = harness({
+    onFind: () => {
+      throw Object.assign(new Error("x"), { label: "notion_aborted" });
+    },
+  });
+  await assert.rejects(h.send("/update_status OPP-002 Active"), (err) => err.label === "notion_aborted");
+  assert.strictEqual(h.count("pages.update"), 0);
+});
