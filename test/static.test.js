@@ -1,13 +1,14 @@
 "use strict";
 
-// Static guards on the bot sources (final rules, Phase 3-5):
+// Static guards on the bot sources (final rules, Phase 3-5; Phase 4 status update):
 //
 // Notion boundary
 // - only bot/notion.js and bot/notionWrite.js load the Notion SDK, and only
 //   bot/index.js loads those adapters and the ID counter;
 // - bot/notion.js calls exactly four reads: blocks.children.list,
 //   databases.retrieve, dataSources.retrieve, dataSources.query;
-// - bot/notionWrite.js calls exactly pages.create (written once) and
+// - bot/notionWrite.js calls exactly pages.create (written once),
+//   pages.update (written once, with a Status-only payload) and
 //   dataSources.retrieve;
 // - no other file touches a Notion client;
 // - nowhere in bot/: any other page API (pages.update / delete / move / ...),
@@ -62,8 +63,12 @@ const READ_ADAPTER = "notion.js";
 const WRITE_ADAPTER = "notionWrite.js";
 const ADAPTERS = [READ_ADAPTER, WRITE_ADAPTER];
 const READ_CALLS = ["blocks.children.list", "databases.retrieve", "dataSources.retrieve", "dataSources.query"];
-const WRITE_CALLS = ["pages.create", "dataSources.retrieve"];
+const WRITE_CALLS = ["pages.create", "pages.update", "dataSources.retrieve"];
 const PAGES_CREATE = /\bclient\s*\.\s*pages\s*\.\s*create\s*\(/g;
+const PAGES_UPDATE = /\bclient\s*\.\s*pages\s*\.\s*update\s*\(/g;
+// The one permitted update, whole: a page ID and the Status select, nothing else.
+const PAGES_UPDATE_STATUS_ONLY =
+  /\bclient\.pages\.update\(\{ page_id: [A-Za-z_$][\w$.]*, properties: \{ Status: \{ select: \{ name: [A-Za-z_$][\w$]* \} \} \} \}\)/g;
 // Modules only index.js may load (it wires them together).
 const WIRED_BY_INDEX = ["./notion", "./notionWrite", "./idCounter"];
 // Phase 1 transport, authorization and session modules stay free of Notion.
@@ -136,11 +141,19 @@ const usedCalls = (code) =>
 
 // The write adapter: its allow-list, pages.create written exactly once, and
 // every other forbidden pattern still forbidden.
+// The write adapter: its allow-list, pages.create written exactly once,
+// pages.update written exactly once and only in the Status-only shape, and
+// every other forbidden pattern still forbidden.
 function writerViolations(code) {
   const violations = clientViolations(code, WRITE_CALLS);
   const creates = [...code.matchAll(PAGES_CREATE)].length;
   if (creates !== 1) violations.push(`pages.create written ${creates} times`);
-  violations.push(...forbiddenCalls(code.replace(PAGES_CREATE, "client.PAGES_CREATE(")));
+  const updates = [...code.matchAll(PAGES_UPDATE)].length;
+  const statusOnly = [...code.matchAll(PAGES_UPDATE_STATUS_ONLY)].length;
+  if (updates !== 1) violations.push(`pages.update written ${updates} times`);
+  if (statusOnly !== updates) violations.push("pages.update with a payload other than Status only");
+  const exempted = code.replace(PAGES_CREATE, "client.PAGES_CREATE(").replace(PAGES_UPDATE_STATUS_ONLY, "client.PAGES_UPDATE_STATUS()");
+  violations.push(...forbiddenCalls(exempted));
   return violations;
 }
 
@@ -195,14 +208,22 @@ test("guard self-test: client use outside an allow-list is detected", () => {
 });
 
 test("guard self-test: the write adapter rule", () => {
-  const ok = "client.dataSources.retrieve({}); client.pages.create({});";
+  const update = "client.pages.update({ page_id: page.id, properties: { Status: { select: { name: newStatus } } } })";
+  const ok = `client.dataSources.retrieve({}); client.pages.create({}); ${update};`;
   assert.deepStrictEqual(writerViolations(ok), []);
   const bad = [
     "client.dataSources.retrieve({});",
     `${ok} client.pages.create({});`,
+    `${ok} ${update};`,
+    "client.dataSources.retrieve({}); client.pages.create({});",
+    "client.dataSources.retrieve({}); client.pages.create({}); client.pages.update({ page_id: page.id, properties: props });",
+    "client.dataSources.retrieve({}); client.pages.create({}); client.pages.update({ page_id: page.id, archived: true });",
+    "client.dataSources.retrieve({}); client.pages.create({}); client.pages.update({ page_id: page.id, properties: { Status: { select: { name: s } }, Name: { title: [] } } });",
+    "client.dataSources.retrieve({}); client.pages.create({}); client.pages.update({ page_id: page.id, properties: { Name: { select: { name: s } } } });",
+    "client.dataSources.retrieve({}); client.pages.create({}); client.pages.update({ page_id: page.id, properties: { Status: { select: { name: s } } }, in_trash: true });",
     `${ok} client.databases.retrieve({});`,
     `${ok} client.dataSources.query({});`,
-    `${ok} client.pages.update({});`,
+    `${ok} client.pages.move({});`,
     `${ok} notion.pages.retrieve({});`,
     `${ok} client.search({});`,
     `${ok} cache.delete(1);`,
@@ -247,7 +268,7 @@ test("the read adapter calls exactly the four permitted reads", () => {
   assert.deepStrictEqual(forbiddenCalls(code), []);
 });
 
-test("the write adapter calls exactly pages.create (written once) and dataSources.retrieve", () => {
+test("the write adapter calls exactly pages.create (once), pages.update (once, Status only) and dataSources.retrieve", () => {
   const { code } = source(WRITE_ADAPTER);
   assert.deepStrictEqual(writerViolations(code), []);
   assert.deepStrictEqual(usedCalls(code), [...WRITE_CALLS].sort());

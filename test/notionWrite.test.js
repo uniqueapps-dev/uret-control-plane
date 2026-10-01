@@ -99,6 +99,11 @@ function fakeNotion(type, opts = {}) {
         if (opts.onCreate) return opts.onCreate(args);
         return { object: "page", id: fakePageId(), url: "https://www.notion.so/example" };
       },
+      update: async (args) => {
+        calls.push({ method: "pages.update", args });
+        if (opts.onUpdate) return opts.onUpdate(args);
+        return { object: "page", id: args.page_id };
+      },
     },
   };
   const resolved = [];
@@ -485,7 +490,200 @@ test("the writer touches nothing but dataSources.retrieve and pages.create", asy
   }
 });
 
-test("the writer exposes only createRecord", () => {
+test("the writer exposes only createRecord and updateStatus", () => {
   const n = fakeNotion("opp");
-  assert.deepStrictEqual(Object.keys(n.writer), ["createRecord"]);
+  assert.deepStrictEqual(Object.keys(n.writer), ["createRecord", "updateStatus"]);
+});
+
+// --- Phase 4 step 2: updateStatus ---------------------------------------------------------
+
+const VOCABULARY = { opp: ["Idea", "Active", "Parked", "Done"], spec: ["Draft", "Approved", "Superseded"], wp: ["Draft", "In progress", "Done", "Blocked"] };
+
+// A fake whose Status select has the full vocabulary, and a page in its data source.
+function statusNotion(type, opts = {}) {
+  const n = fakeNotion(type, opts);
+  n.dataSource.properties = { ...n.dataSource.properties, Status: select(VOCABULARY[type]) };
+  n.page = (extra = {}) => ({ object: "page", id: fakePageId(), in_trash: false, parent: { type: "data_source_id", data_source_id: dashedId(n.dsId) }, ...extra });
+  return n;
+}
+
+test("the status vocabulary per type is the locked one", () => {
+  assert.deepStrictEqual(nw.STATUS_VOCABULARY, VOCABULARY);
+});
+
+test("updateStatus: one schema read, then one pages.update with the Status property only", async () => {
+  for (const [type, status] of [["opp", "Active"], ["spec", "Approved"], ["wp", "In progress"]]) {
+    const n = statusNotion(type);
+    const page = n.page();
+    assert.deepStrictEqual(await n.writer.updateStatus(type, page, status), { status });
+    assert.deepStrictEqual(n.calls.map((c) => c.method), ["dataSources.retrieve", "pages.update"], type);
+    assert.deepStrictEqual(n.calls[0].args, { data_source_id: n.dsId });
+    assert.deepStrictEqual(n.calls[1].args, { page_id: page.id, properties: { Status: { select: { name: status } } } }, type);
+    assert.deepStrictEqual(n.resolved.map((r) => r.type), [type]);
+  }
+});
+
+test("every status in each vocabulary is accepted", async () => {
+  for (const [type, statuses] of Object.entries(VOCABULARY)) {
+    for (const status of statuses) {
+      const n = statusNotion(type);
+      await n.writer.updateStatus(type, n.page(), status);
+      assert.strictEqual(n.count("pages.update"), 1, `${type} ${status}`);
+    }
+  }
+});
+
+test("statuses outside the type's vocabulary are refused before any Notion call", async () => {
+  const cases = [
+    ["opp", "Approved"], ["opp", "Draft"], ["opp", "active"], ["opp", " Active"],
+    ["spec", "Done"], ["spec", "Active"],
+    ["wp", "Active"], ["wp", "In Progress"], ["wp", "Superseded"],
+    ["wp", ""], ["wp", undefined], ["wp", null], ["wp", ["Done"]],
+  ];
+  for (const [type, status] of cases) {
+    const n = statusNotion(type);
+    await rejectsWith(n.writer.updateStatus(type, n.page(), status), "notion_write_failed");
+    assert.strictEqual(n.calls.length + n.resolved.length, 0, `${type} ${String(status)}`);
+  }
+});
+
+test("unknown record types are refused (Evidence and Releases have no status command)", async () => {
+  const n = statusNotion("opp");
+  for (const type of ["evd", "rel", "OPP", "__proto__", "constructor", undefined]) {
+    await assert.rejects(n.writer.updateStatus(type, n.page(), "Done"), TypeError);
+  }
+  assert.strictEqual(n.calls.length, 0);
+});
+
+test("a missing, malformed or trashed page is refused before any Notion call", async () => {
+  const n = statusNotion("opp");
+  for (const page of [null, undefined, {}, { id: "OPP-002" }, { id: 42 }, n.page({ in_trash: true }), n.page({ archived: true })]) {
+    await rejectsWith(n.writer.updateStatus("opp", page, "Active"), "notion_write_failed");
+  }
+  assert.strictEqual(n.calls.length, 0);
+});
+
+test("a page that is not in the verified data source is never updated", async () => {
+  const n = statusNotion("spec");
+  const pages = [
+    n.page({ parent: { type: "data_source_id", data_source_id: fakePageId() } }),
+    n.page({ parent: { type: "database_id", database_id: n.dsId } }),
+    n.page({ parent: { type: "page_id", page_id: n.root } }),
+    n.page({ parent: undefined }),
+  ];
+  for (const page of pages) {
+    await rejectsWith(n.writer.updateStatus("spec", page, "Approved"), "notion_write_failed");
+  }
+  assert.strictEqual(n.count("pages.update"), 0);
+});
+
+test("schema problems stop the update: Status missing, of another type, or without the option", async () => {
+  const statusCases = [
+    undefined,
+    { type: "status", status: { options: [{ name: "Active" }] } },
+    { type: "multi_select", multi_select: { options: [{ name: "Active" }] } },
+    select(["Idea", "Parked", "Done"]),
+  ];
+  for (const status of statusCases) {
+    const n = statusNotion("opp");
+    if (status === undefined) delete n.dataSource.properties.Status;
+    else n.dataSource.properties.Status = status;
+    await rejectsWith(n.writer.updateStatus("opp", n.page(), "Active"), "notion_schema_invalid");
+    assert.strictEqual(n.count("pages.update"), 0);
+  }
+});
+
+test("a data source outside the root, with another title, or in the trash is refused for updates", async () => {
+  const changes = [
+    { database_parent: { type: "page_id", page_id: fakePageId() } },
+    { database_parent: undefined },
+    { title: rt("URET – Specs") },
+    { in_trash: true },
+  ];
+  for (const change of changes) {
+    const n = statusNotion("wp");
+    Object.assign(n.dataSource, change);
+    await rejectsWith(n.writer.updateStatus("wp", n.page(), "Done"), "notion_schema_invalid");
+    assert.strictEqual(n.count("pages.update"), 0);
+  }
+  const empty = statusNotion("wp", { onRetrieve: () => null });
+  await rejectsWith(empty.writer.updateStatus("wp", empty.page(), "Done"), "notion_schema_invalid");
+});
+
+test("pages.update failures map to fixed labels, once, without retry", async () => {
+  const cases = [
+    [apiError("unauthorized", 401, [fakeNotionToken()]), "notion_unauthorized", false],
+    [apiError("restricted_resource", 403, [fakeNotionToken()]), "notion_unauthorized", false],
+    [apiError("validation_error", 400, [fakeNotionToken()]), "notion_write_failed", false],
+    [apiError("object_not_found", 404, [fakeNotionToken()]), "notion_write_failed", false],
+    [apiError("conflict_error", 409, [fakeNotionToken()]), "notion_write_failed", false],
+    [apiError("rate_limited", 429, [fakeNotionToken()]), "notion_unavailable", false],
+    [apiError("internal_server_error", 500, [fakeNotionToken()]), "notion_unavailable", true],
+    [new RequestTimeoutError(), "notion_unavailable", true],
+    [new TypeError("fetch failed"), "notion_unavailable", true],
+  ];
+  for (const [error, label, uncertain] of cases) {
+    const n = statusNotion("opp", {
+      onUpdate: () => {
+        throw error;
+      },
+    });
+    await rejectsWith(n.writer.updateStatus("opp", n.page(), "Done"), label, uncertain);
+    assert.strictEqual(n.count("pages.update"), 1, `${label}: retried`);
+  }
+});
+
+test("schema-read failures before an update are never uncertain", async () => {
+  const n = statusNotion("opp", {
+    onRetrieve: () => {
+      throw new RequestTimeoutError();
+    },
+  });
+  await rejectsWith(n.writer.updateStatus("opp", n.page(), "Done"), "notion_unavailable", false);
+  assert.strictEqual(n.count("pages.update"), 0);
+});
+
+test("an unexpected update response counts as a possibly applied failure", async () => {
+  const n = statusNotion("opp", { onUpdate: () => ({ object: "list" }) });
+  await rejectsWith(n.writer.updateStatus("opp", n.page(), "Done"), "notion_write_failed", true);
+});
+
+test("aborting during pages.update is reported as possibly applied; before it, nothing is sent", async () => {
+  const ac = new AbortController();
+  const n = statusNotion("opp", {
+    onUpdate: () => {
+      ac.abort();
+      return new Promise(() => {});
+    },
+  });
+  await rejectsWith(n.writer.updateStatus("opp", n.page(), "Done", { signal: ac.signal }), "notion_aborted", true);
+  const early = new AbortController();
+  early.abort();
+  const m = statusNotion("opp");
+  await rejectsWith(m.writer.updateStatus("opp", m.page(), "Done", { signal: early.signal }), "notion_aborted", false);
+  assert.strictEqual(m.count("pages.update"), 0);
+});
+
+test("update errors never carry tokens, IDs, request IDs or raw bodies", async () => {
+  const token = fakeNotionToken();
+  const n = statusNotion("opp", {
+    onUpdate: (args) => {
+      throw apiError("validation_error", 400, [token, args.page_id, n.dsId]);
+    },
+  });
+  const page = n.page();
+  await assert.rejects(n.writer.updateStatus("opp", page, "Done"), (err) => {
+    const dump = [err.message, err.stack, util.inspect(err, { depth: 5, showHidden: true }), JSON.stringify(err)].join("\n");
+    for (const secret of [token, page.id, dashedId(n.dsId), n.dsId, "req-SECRET", "Bearer", "Failed for"]) {
+      assert.ok(!dump.includes(secret), `leaked ${secret.slice(0, 6)}`);
+    }
+    assert.deepStrictEqual(Object.keys(err).sort(), ["label", "name", "uncertain"]);
+    return true;
+  });
+});
+
+test("a successful update returns only the status", async () => {
+  const n = statusNotion("wp");
+  const out = await n.writer.updateStatus("wp", n.page(), "Blocked");
+  assert.deepStrictEqual(out, { status: "Blocked" });
 });

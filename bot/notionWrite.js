@@ -1,13 +1,15 @@
 "use strict";
 
 /**
- * Notion write adapter: creates new Opportunity, Spec and Work Package records.
+ * Notion write adapter: creates new Opportunity, Spec and Work Package records
+ * and changes the Status of existing ones.
  *
- * This is the only bot module that writes to Notion, and the only write it
- * makes is pages.create. It also calls dataSources.retrieve, to verify the
- * target data source and its schema immediately before every create. It never
- * updates, deletes, moves or appends anything, never calls search or
- * client.request, and never retries.
+ * This is the only bot module that writes to Notion. It makes two writes:
+ * pages.create, and pages.update with the Status property only. It also calls
+ * dataSources.retrieve, to verify the target data source and its schema
+ * immediately before every write. It never changes any other property, never
+ * deletes, moves or appends anything, never calls search or client.request,
+ * and never retries.
  *
  * Callers pass plain answers; this module builds the Notion properties itself
  * and fixes the initial Status (Idea for Opportunities, Draft otherwise).
@@ -77,7 +79,7 @@ const TARGETS = {
 class NotionWriteError extends Error {
   /**
    * label: fixed "notion_*" label for the reply.
-   * uncertain: true when pages.create was sent and may have been applied
+   * uncertain: true when a write (pages.create or pages.update) was sent and may have been applied
    * (timeout, transport failure, server error, abort).
    */
   constructor(label, { uncertain = false } = {}) {
@@ -153,6 +155,13 @@ function richText(value) {
 
 const invalidRecord = () => new NotionWriteError("notion_write_failed");
 
+// The Status values each type may be set to (the setup script's options).
+const STATUS_VOCABULARY = {
+  opp: ["Idea", "Active", "Parked", "Done"],
+  spec: ["Draft", "Approved", "Superseded"],
+  wp: ["Draft", "In progress", "Done", "Blocked"],
+};
+
 // Checks the caller's record before anything is sent. Throws without any call.
 function checkRecord(target, record) {
   if (!record || typeof record !== "object") throw invalidRecord();
@@ -227,19 +236,19 @@ function createNotionWriter({ client, rootPageId, resolveDataSource }) {
   if (typeof resolveDataSource !== "function") throw new TypeError("resolveDataSource is required");
 
   // Runs one SDK call. Aborting (bot shutdown) abandons it without waiting;
-  // an abandoned create counts as possibly applied.
-  async function call(fn, signal, { isCreate = false } = {}) {
+  // an abandoned write counts as possibly applied.
+  async function call(fn, signal, { isWrite = false } = {}) {
     if (signal && signal.aborted) throw new NotionWriteError("notion_aborted");
     let onAbort;
     const aborted = new Promise((_, reject) => {
-      onAbort = () => reject(new NotionWriteError("notion_aborted", { uncertain: isCreate }));
+      onAbort = () => reject(new NotionWriteError("notion_aborted", { uncertain: isWrite }));
       if (signal) signal.addEventListener("abort", onAbort, { once: true });
     });
     const request = (async () => {
       try {
         return await fn();
       } catch (err) {
-        throw new NotionWriteError(labelFor(err), { uncertain: isCreate && maybeApplied(err) });
+        throw new NotionWriteError(labelFor(err), { uncertain: isWrite && maybeApplied(err) });
       }
     })();
     request.catch(() => {}); // an abandoned request must not become an unhandled rejection
@@ -271,19 +280,59 @@ function createNotionWriter({ client, rootPageId, resolveDataSource }) {
           properties: buildProperties(target, record),
         }),
       signal,
-      { isCreate: true }
+      { isWrite: true }
     );
     if (!created || created.object !== "page") throw new NotionWriteError("notion_write_failed", { uncertain: true });
     return { uretId: record.uretId };
   }
 
-  return { createRecord };
+  /**
+   * Sets the Status of an existing record of type "opp", "spec" or "wp".
+   * `page` is the page object from the read adapter's lookup. Before the
+   * write: the value must be in the type's vocabulary, the page must not be
+   * trashed, the target data source must pass the same checks as for a create
+   * (root parent, title, not trashed), its Status must be a select that has the
+   * option, and the page must belong to that data source. Then one
+   * pages.update with the Status property only. Returns { status }.
+   */
+  async function updateStatus(type, page, newStatus, { signal } = {}) {
+    if (!Object.prototype.hasOwnProperty.call(STATUS_VOCABULARY, type)) throw new TypeError("unknown record type");
+    if (typeof newStatus !== "string" || !STATUS_VOCABULARY[type].includes(newStatus)) throw invalidRecord();
+    if (!page || !isPageId(page.id) || isTrashed(page)) throw invalidRecord();
+
+    const dataSourceId = await resolveDataSource(type, { signal });
+    const dataSource = await call(() => client.dataSources.retrieve({ data_source_id: dataSourceId }), signal);
+    const parent = dataSource && dataSource.database_parent;
+    const status = dataSource && dataSource.properties && dataSource.properties.Status;
+    if (
+      !parent || parent.type !== "page_id" || normId(parent.page_id) !== normId(rootPageId) ||
+      normTitle(plainTitle(dataSource.title)) !== normTitle(TARGETS[type].title) || isTrashed(dataSource) ||
+      !status || status.type !== "select" || !optionNames(status, "select").has(newStatus)
+    ) {
+      throw new NotionWriteError("notion_schema_invalid");
+    }
+    const pageParent = page.parent;
+    if (!pageParent || pageParent.type !== "data_source_id" || normId(pageParent.data_source_id) !== normId(dataSourceId)) {
+      throw invalidRecord();
+    }
+
+    const updated = await call(
+      () => client.pages.update({ page_id: page.id, properties: { Status: { select: { name: newStatus } } } }),
+      signal,
+      { isWrite: true }
+    );
+    if (!updated || updated.object !== "page") throw new NotionWriteError("notion_write_failed", { uncertain: true });
+    return { status: newStatus };
+  }
+
+  return { createRecord, updateStatus };
 }
 
 module.exports = {
   NOTION_VERSION,
   TIMEOUT_MS,
   TARGETS,
+  STATUS_VOCABULARY,
   NotionWriteError,
   createNotionWriteClient,
   createNotionWriter,
