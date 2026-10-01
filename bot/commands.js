@@ -2,7 +2,8 @@
 
 /**
  * Command router. /start, /help, /cancel, /status, /show, /health,
- * /new_opportunity, /new_spec, /new_work and /new_evidence do something. Plain text answers an active capture
+ * /new_opportunity, /new_spec, /new_work, /new_evidence and /update_status
+ * do something. Plain text answers an active capture
  * session (see captureFlows.js); any other input gets a pointer to /help.
  *
  * Handlers are asynchronous and always awaited. /status, /show and /health
@@ -16,6 +17,7 @@ const { buildHealthReport } = require("./health");
 const opp = require("./opportunities");
 const { createCaptureStore } = require("./captureSession");
 const { createCaptureFlows } = require("./captureFlows");
+const { createStatusUpdater } = require("./statusUpdate");
 
 const COMMAND_LIST = [
   "/start - introduction",
@@ -28,6 +30,7 @@ const COMMAND_LIST = [
   "/new_spec <OPP-ID> - create a Spec for an Opportunity (guided)",
   "/new_work <SPEC-ID> - create a Work Package for a Spec (guided)",
   "/new_evidence <WP-ID> - record Evidence for a Work Package (guided)",
+  "/update_status <URET-ID> <status> - change the Status of an Opportunity, Spec or Work Package",
 ].join("\n");
 
 const START_TEXT = [
@@ -39,7 +42,8 @@ const START_TEXT = [
   COMMAND_LIST,
   "",
   "It can create new Opportunities, Specs, Work Packages and Evidence through guided questions.",
-  "It never changes or deletes existing URET records.",
+  "It can change the Status of existing Opportunities, Specs and Work Packages.",
+  "It never deletes records or changes any other field.",
 ].join("\n");
 
 const HELP_TEXT = ["Commands:", COMMAND_LIST].join("\n");
@@ -87,6 +91,7 @@ function parseCommand(text) {
  */
 function createRouter({ sessions, configStatus, logDir, notion = null, writer = null, reserveId = null, capture = createCaptureStore() }) {
   const flows = createCaptureFlows({ capture, reader: notion, writer, reserveId });
+  const statusUpdates = createStatusUpdater({ reader: notion, writer });
 
   // Runs an adapter read and turns a labelled failure into its fixed reply.
   // Aborts (shutdown) and unlabelled errors propagate to the caller.
@@ -155,6 +160,11 @@ function createRouter({ sessions, configStatus, logDir, notion = null, writer = 
     new_spec: async ({ chatId, args, signal }) => startFlow("new_spec", chatId, args, signal),
     new_work: async ({ chatId, args, signal }) => startFlow("new_work", chatId, args, signal),
     new_evidence: async ({ chatId, args, signal }) => startFlow("new_evidence", chatId, args, signal),
+    update_status: async ({ args, signal }) => {
+      if (!notion || !writer) return { reply: NOT_CONFIGURED_TEXT, label: "notion_not_configured" };
+      const result = await read(() => statusUpdates.run(args, signal));
+      return result.reply ? result : result.value;
+    },
   };
 
   /**

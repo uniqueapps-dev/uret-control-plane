@@ -18,7 +18,7 @@ const { createSessionStore } = require("../bot/session");
 const { tempDir } = require("./helpers");
 
 const VALID_STATUS = { TELEGRAM_BOT_TOKEN: "valid", TELEGRAM_ALLOWED_USER_ID: "valid" };
-const TEN = ["/start", "/help", "/cancel", "/status", "/show", "/health", "/new_opportunity", "/new_spec", "/new_work", "/new_evidence"];
+const ELEVEN = ["/start", "/help", "/cancel", "/status", "/show", "/health", "/new_opportunity", "/new_spec", "/new_work", "/new_evidence", "/update_status"];
 
 // Error shaped like the adapter's NotionReadError: a fixed label only.
 const labelled = (label) => Object.assign(new Error(`Notion read failed (${label})`), { label });
@@ -65,7 +65,7 @@ test("parseCommand returns the command name and the text after it", () => {
   assert.strictEqual(parseCommand(undefined), null);
 });
 
-test("/start introduces the bot and lists the ten commands", async () => {
+test("/start introduces the bot and lists the eleven commands", async () => {
   const { router } = setup();
   const { command, reply } = await router.route({ text: "/start", chatId: 1 });
   assert.strictEqual(command, "start");
@@ -73,16 +73,17 @@ test("/start introduces the bot and lists the ten commands", async () => {
   assert.match(reply, /URET Control Bot MVP v0\.1/);
   assert.match(reply, /phone-first/);
   assert.match(reply, /create new Opportunities, Specs, Work Packages and Evidence through guided questions/);
-  assert.match(reply, /never changes or deletes existing URET records/);
-  assert.deepStrictEqual(reply.match(/^\/\w+/gm), TEN);
+  assert.match(reply, /can change the Status of existing Opportunities, Specs and Work Packages/);
+  assert.match(reply, /never deletes records or changes any other field/);
+  assert.deepStrictEqual(reply.match(/^\/\w+/gm), ELEVEN);
   assert.doesNotMatch(reply, /notion|hermes|connected/i);
 });
 
-test("/help lists exactly the ten commands", async () => {
+test("/help lists exactly the eleven commands", async () => {
   const { router } = setup();
   const { reply } = await router.route({ text: "/help", chatId: 1 });
   assert.strictEqual(reply, HELP_TEXT);
-  assert.deepStrictEqual(reply.match(/^\/\w+/gm), TEN);
+  assert.deepStrictEqual(reply.match(/^\/\w+/gm), ELEVEN);
   assert.match(reply, /^\/show <URET-ID> /m);
 });
 

@@ -376,6 +376,7 @@ module.exports = {
   ACTIVE_SESSION_TEXT,
   TEXT_ONLY_TEXT,
   CREATE_ERROR_TEXT,
+  READ_LABELS,
   unconfirmedText,
   createCaptureFlows,
 };
