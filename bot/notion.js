@@ -28,6 +28,11 @@ const MAX_STATUS_PAGES = 10;
 const MAX_CHILD_PAGES = 10;
 // Linked records listed by /show (more are marked as such).
 const MAX_LINKED = 10;
+// Evidence counting: at most this many pages of 100 records per count, and at
+// most this many Work Packages per Spec; beyond either the count is marked
+// incomplete instead of being cut silently.
+const MAX_COUNT_PAGES = 10;
+const MAX_SPEC_WORK_PACKAGES = 25;
 
 // Opportunities: required properties and types (Status options checked separately).
 const REQUIRED_SCHEMA = {
@@ -78,7 +83,18 @@ const WORK_PACKAGE_SCHEMA = {
   Evidence: "relation",
 };
 
-// Evidence and Releases are only looked up by URET ID, so only what that needs.
+// Evidence (Phase 4): what /new_evidence writes, /show EVD reads and the
+// evidence counts filter on.
+const EVIDENCE_SCHEMA = {
+  "URET ID": "rich_text",
+  Name: "title",
+  "Work package": "relation",
+  Type: "select",
+  Summary: "rich_text",
+  Verdict: "select",
+};
+
+// Releases are only looked up by URET ID, so only what that needs.
 const LOOKUP_SCHEMA = { "URET ID": "rich_text", Name: "title" };
 
 // The five URET data sources, by type key. Only Opportunities also checks
@@ -87,7 +103,7 @@ const SOURCES = {
   opp: { title: SOURCE_TITLE, prefix: "OPP", schema: REQUIRED_SCHEMA, statusOptions: REQUIRED_STATUSES },
   spec: { title: "URET – Specs", prefix: "SPEC", schema: SPEC_SCHEMA },
   wp: { title: "URET – Work Packages", prefix: "WP", schema: WORK_PACKAGE_SCHEMA },
-  evd: { title: "URET – Evidence", prefix: "EVD", schema: LOOKUP_SCHEMA },
+  evd: { title: "URET – Evidence", prefix: "EVD", schema: EVIDENCE_SCHEMA },
   rel: { title: "URET – Releases", prefix: "REL", schema: LOOKUP_SCHEMA },
 };
 
@@ -359,6 +375,68 @@ function createNotionReader({ client, rootPageId }) {
   }
 
   /**
+   * Counts the non-trashed records of `type` whose relation `relation`
+   * contains `pageId`, paging through at most MAX_COUNT_PAGES pages.
+   * Returns { count, incomplete, pageIds } (pageIds of the counted records).
+   */
+  async function countRelated(type, relation, pageId, signal) {
+    if (typeof pageId !== "string" || pageId === "") throw new TypeError("page ID required");
+    return withSource(type, signal, async (source) => {
+      let count = 0;
+      const pageIds = [];
+      let cursor;
+      for (let page = 0; page < MAX_COUNT_PAGES; page++) {
+        const res = await call(
+          () =>
+            client.dataSources.query({
+              data_source_id: source.dataSourceId,
+              filter: { property: relation, relation: { contains: pageId } },
+              page_size: PAGE_SIZE,
+              start_cursor: cursor,
+            }),
+          signal
+        );
+        for (const item of (res && res.results) || []) {
+          if (!item || item.object !== "page" || isTrashed(item)) continue;
+          count++;
+          pageIds.push(item.id);
+        }
+        if (!res || !res.has_more) return { count, incomplete: false, pageIds };
+        cursor = res.next_cursor;
+      }
+      return { count, incomplete: true, pageIds };
+    });
+  }
+
+  /**
+   * Evidence records linked to one Work Package (by its page ID).
+   * Returns { count, incomplete }.
+   */
+  async function countEvidenceForWP(wpPageId, { signal } = {}) {
+    const { count, incomplete } = await countRelated("evd", "Work package", wpPageId, signal);
+    return { count, incomplete };
+  }
+
+  /**
+   * Evidence for a Spec (by its page ID): the sum over the Work Packages whose
+   * "Spec" includes it. Evidence links to Work Packages only. At most
+   * MAX_SPEC_WORK_PACKAGES Work Packages are counted; beyond that, or if any
+   * count is cut short, the result is marked incomplete. Returns
+   * { count, incomplete, workPackages }.
+   */
+  async function countEvidenceForSpec(specPageId, { signal } = {}) {
+    const wps = await countRelated("wp", "Spec", specPageId, signal);
+    let incomplete = wps.incomplete || wps.pageIds.length > MAX_SPEC_WORK_PACKAGES;
+    let count = 0;
+    for (const wpPageId of wps.pageIds.slice(0, MAX_SPEC_WORK_PACKAGES)) {
+      const evidence = await countRelated("evd", "Work package", wpPageId, signal);
+      count += evidence.count;
+      if (evidence.incomplete) incomplete = true;
+    }
+    return { count, incomplete, workPackages: wps.count };
+  }
+
+  /**
    * ID of the verified data source for a source type, discovering it if
    * needed; refused if its schema is invalid. For the write adapter only:
    * the ID stays inside the process and is never logged or shown.
@@ -412,6 +490,8 @@ function createNotionReader({ client, rootPageId }) {
     countByStatus,
     findByUretId,
     findLinkedUretIds,
+    countEvidenceForWP,
+    countEvidenceForSpec,
     getDataSourceId,
     health,
     // For tests: whether a source type's data source is currently remembered.
@@ -426,8 +506,11 @@ module.exports = {
   REQUIRED_SCHEMA,
   SPEC_SCHEMA,
   WORK_PACKAGE_SCHEMA,
+  EVIDENCE_SCHEMA,
   SOURCES,
   MAX_STATUS_PAGES,
+  MAX_COUNT_PAGES,
+  MAX_SPEC_WORK_PACKAGES,
   NotionReadError,
   createNotionClient,
   createNotionReader,

@@ -618,7 +618,7 @@ test("the guard really blocks anything outside the allow-list", () => {
 
 test("the adapter exposes no write operation", () => {
   const reader = fakeWorkspace().reader;
-  assert.deepStrictEqual(Object.keys(reader).sort(), ["countByStatus", "findByUretId", "findLinkedUretIds", "getDataSourceId", "hasCachedSource", "health"]);
+  assert.deepStrictEqual(Object.keys(reader).sort(), ["countByStatus", "countEvidenceForSpec", "countEvidenceForWP", "findByUretId", "findLinkedUretIds", "getDataSourceId", "hasCachedSource", "health"]);
 });
 
 // --- Phase 3-5 step 1: all five URET data sources -----------------------------------
@@ -649,6 +649,12 @@ function schemaFor(type) {
       Type: p("type", "select", { options: [] }), Worker: p("wrk", "select", { options: [] }), Status: p("stat", "select", { options: [] }),
       Summary: p("sum", "rich_text"), Instructions: p("ins", "rich_text"), Outputs: p("out", "rich_text"),
       "Commit / PR": p("pr", "url"), "Start date": p("sd", "date"), "End date": p("ed", "date"), Evidence: p("evd", "relation"),
+    };
+  }
+  if (type === "evd") {
+    return {
+      "URET ID": p("uid", "rich_text"), Name: p("title", "title"), "Work package": p("wp", "relation"),
+      Type: p("type", "select", { options: [] }), Summary: p("sum", "rich_text"), Verdict: p("ver", "select", { options: [] }),
     };
   }
   return { "URET ID": p("uid", "rich_text"), Name: p("title", "title") };
@@ -859,4 +865,120 @@ test("findLinkedUretIds errors carry fixed labels", async () => {
     },
   });
   await rejectsWith(ws.reader.findLinkedUretIds("opp", "Specs", fakePageId()), "notion_timeout");
+});
+
+// --- Phase 4 step 1: evidence counts ------------------------------------------------------
+
+const pageItem = (extra = {}) => ({ object: "page", id: fakePageId(), in_trash: false, properties: {}, ...extra });
+
+test("the Evidence schema requires the properties Phase 4 writes and reads", () => {
+  assert.deepStrictEqual(notion.EVIDENCE_SCHEMA, {
+    "URET ID": "rich_text", Name: "title", "Work package": "relation", Type: "select", Summary: "rich_text", Verdict: "select",
+  });
+  assert.strictEqual(notion.SOURCES.evd.schema, notion.EVIDENCE_SCHEMA);
+  const missing = schemaFor("evd");
+  delete missing["Work package"];
+  missing.Verdict = { id: "ver", type: "rich_text", rich_text: {} };
+  assert.deepStrictEqual(notion.verifySchema({ properties: missing }, "evd").problems, ["missing:Work package", "type:Verdict"]);
+});
+
+test("countEvidenceForWP queries Evidence by its Work package relation and skips trashed records", async () => {
+  const wpPage = fakePageId();
+  const ws = multiWorkspace({
+    query: { evd: () => ({ results: [pageItem(), pageItem({ in_trash: true }), pageItem({ archived: true }), pageItem(), { object: "data_source" }], has_more: false }) },
+  });
+  assert.deepStrictEqual(await ws.reader.countEvidenceForWP(wpPage), { count: 2, incomplete: false });
+  const queries = ws.calls.filter((c) => c.method === "dataSources.query");
+  assert.strictEqual(queries.length, 1);
+  assert.strictEqual(ws.typeOfQuery(queries[0]), "evd");
+  assert.deepStrictEqual(queries[0].args.filter, { property: "Work package", relation: { contains: wpPage } });
+  assert.strictEqual(queries[0].args.page_size, 100);
+});
+
+test("countEvidenceForWP pages through results and marks the count incomplete at the page cap", async () => {
+  let n = 0;
+  const twoPages = multiWorkspace({
+    query: { evd: (args) => (args.start_cursor ? { results: [pageItem()], has_more: false } : { results: [pageItem(), pageItem()], has_more: true, next_cursor: "c2" }) },
+  });
+  assert.deepStrictEqual(await twoPages.reader.countEvidenceForWP(fakePageId()), { count: 3, incomplete: false });
+  assert.strictEqual(twoPages.calls.filter((c) => c.method === "dataSources.query")[1].args.start_cursor, "c2");
+  const endless = multiWorkspace({ query: { evd: () => ({ results: [pageItem()], has_more: true, next_cursor: String(++n) }) } });
+  assert.deepStrictEqual(await endless.reader.countEvidenceForWP(fakePageId()), { count: notion.MAX_COUNT_PAGES, incomplete: true });
+  assert.strictEqual(endless.count("dataSources.query"), notion.MAX_COUNT_PAGES);
+});
+
+test("countEvidenceForSpec sums the evidence of the Spec's Work Packages", async () => {
+  const specPage = fakePageId();
+  const wpA = pageItem();
+  const wpB = pageItem();
+  const evidence = { [wpA.id]: 2, [wpB.id]: 3 };
+  const ws = multiWorkspace({
+    query: {
+      wp: () => ({ results: [wpA, pageItem({ in_trash: true }), wpB], has_more: false }),
+      evd: (args) => ({ results: Array.from({ length: evidence[args.filter.relation.contains] || 0 }, () => pageItem()), has_more: false }),
+    },
+  });
+  assert.deepStrictEqual(await ws.reader.countEvidenceForSpec(specPage), { count: 5, incomplete: false, workPackages: 2 });
+  const queries = ws.calls.filter((c) => c.method === "dataSources.query");
+  assert.deepStrictEqual(queries.map((c) => ws.typeOfQuery(c)), ["wp", "evd", "evd"]);
+  assert.deepStrictEqual(queries[0].args.filter, { property: "Spec", relation: { contains: specPage } });
+  assert.deepStrictEqual(queries.slice(1).map((c) => c.args.filter.relation.contains), [wpA.id, wpB.id], "trashed Work Package counted");
+});
+
+test("countEvidenceForSpec: no Work Packages is zero; too many is capped and marked incomplete", async () => {
+  const none = multiWorkspace();
+  assert.deepStrictEqual(await none.reader.countEvidenceForSpec(fakePageId()), { count: 0, incomplete: false, workPackages: 0 });
+  assert.strictEqual(none.count("dataSources.query"), 1);
+  const many = notion.MAX_SPEC_WORK_PACKAGES + 3;
+  const big = multiWorkspace({
+    query: {
+      wp: () => ({ results: Array.from({ length: many }, () => pageItem()), has_more: false }),
+      evd: () => ({ results: [pageItem()], has_more: false }),
+    },
+  });
+  assert.deepStrictEqual(await big.reader.countEvidenceForSpec(fakePageId()), { count: notion.MAX_SPEC_WORK_PACKAGES, incomplete: true, workPackages: many });
+  assert.strictEqual(big.count("dataSources.query"), 1 + notion.MAX_SPEC_WORK_PACKAGES);
+});
+
+test("countEvidenceForSpec is incomplete when any Work Package's evidence count is", async () => {
+  let n = 0;
+  const ws = multiWorkspace({
+    query: {
+      wp: () => ({ results: [pageItem()], has_more: false }),
+      evd: () => ({ results: [pageItem()], has_more: true, next_cursor: String(++n) }),
+    },
+  });
+  const out = await ws.reader.countEvidenceForSpec(fakePageId());
+  assert.deepStrictEqual(out, { count: notion.MAX_COUNT_PAGES, incomplete: true, workPackages: 1 });
+});
+
+test("evidence counts refuse an Evidence source without the Phase 4 schema, before any query", async () => {
+  const props = schemaFor("evd");
+  delete props["Work package"];
+  const ws = multiWorkspace({ properties: { evd: props } });
+  await rejectsWith(ws.reader.countEvidenceForWP(fakePageId()), "notion_schema_invalid");
+  assert.strictEqual(ws.count("dataSources.query"), 0);
+});
+
+test("evidence counts need a page ID and pass Notion errors on as fixed labels", async () => {
+  const ws = multiWorkspace();
+  for (const bad of ["", undefined, null, 42]) {
+    await assert.rejects(ws.reader.countEvidenceForWP(bad), TypeError);
+    await assert.rejects(ws.reader.countEvidenceForSpec(bad), TypeError);
+  }
+  assert.strictEqual(ws.calls.length, 0);
+  const failing = multiWorkspace({
+    query: {
+      evd: () => {
+        throw new RequestTimeoutError();
+      },
+    },
+  });
+  await rejectsWith(failing.reader.countEvidenceForWP(fakePageId()), "notion_timeout");
+});
+
+test("evidence counts never call anything but the four permitted reads", async () => {
+  const ws = multiWorkspace({ query: { wp: () => ({ results: [pageItem()], has_more: false }) } });
+  await ws.reader.countEvidenceForSpec(fakePageId());
+  assert.deepStrictEqual([...new Set(ws.calls.map((c) => c.method))].sort(), ["blocks.children.list", "dataSources.query", "dataSources.retrieve", "databases.retrieve"]);
 });
