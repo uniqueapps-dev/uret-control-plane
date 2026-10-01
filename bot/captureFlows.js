@@ -102,11 +102,12 @@ function freeText(text) {
 }
 
 const numbered = (options) => options.map((o, i) => `${i + 1}. ${o}`).join("\n");
-// A required answer (no "-" to skip), at most `max` characters; may span lines.
+// A required answer, at most `max` characters; may span lines. "-" (the skip
+// answer elsewhere) counts as empty here.
 function requiredText(max) {
   return (text) => {
     const value = text.trim();
-    if (value === "") return { error: "Please answer; this question cannot be left empty." };
+    if (value === "" || value === SKIP) return { error: "Answer required. This field cannot be empty." };
     if (Array.from(value).length > max) return { error: `Too long (max ${max} characters).` };
     return { value };
   };
@@ -239,8 +240,14 @@ const FLOWS = {
       { key: "details", label: "Details", prompt: `Details? (max ${MAX_EVIDENCE_DETAILS} characters)`, validate: requiredText(MAX_EVIDENCE_DETAILS) },
       { key: "nextAction", label: "Next action", prompt: `Next action? (max ${MAX_NEXT_ACTION} characters)`, validate: requiredText(MAX_NEXT_ACTION) },
     ],
-    // The record's Name is the summary on one line; Summary holds all three texts.
-    toRecord: (a) => ({ title: a.summary.replace(/\s+/g, " "), type: a.type, verdict: a.verdict, summary: structuredSummary(a) }),
+    // The record's Name is the summary on one line, at most MAX_TITLE
+    // characters; Summary holds all three texts.
+    toRecord: (a) => ({
+      title: Array.from(a.summary.replace(/\s+/g, " ")).slice(0, MAX_TITLE).join(""),
+      type: a.type,
+      verdict: a.verdict,
+      summary: structuredSummary(a),
+    }),
     confirmation: (uretId, a, parentId) =>
       [
         `Created ${uretId}`,

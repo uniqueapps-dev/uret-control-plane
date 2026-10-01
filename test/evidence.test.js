@@ -246,7 +246,8 @@ test("text answers are required (no '-' to skip) and limited: 500, 2000, 500 cha
   const h = harness({ records: { "WP-002": wpPage() } });
   await h.send("/new_evidence WP-002");
   await h.send("1");
-  assert.strictEqual((await h.send("   ")).reply, "Please answer; this question cannot be left empty.\n\n2/5 Summary? (max 500 characters)");
+  assert.strictEqual((await h.send("   ")).reply, "Answer required. This field cannot be empty.\n\n2/5 Summary? (max 500 characters)");
+  assert.strictEqual((await h.send(" - ")).reply, "Answer required. This field cannot be empty.\n\n2/5 Summary? (max 500 characters)");
   assert.match((await h.send("s".repeat(501))).reply, /^Too long \(max 500 characters\)\./);
   assert.match((await h.send("s".repeat(500))).reply, /^3\/5 /);
   await h.send("2");
@@ -257,11 +258,31 @@ test("text answers are required (no '-' to skip) and limited: 500, 2000, 500 cha
   assert.strictEqual(h.count("pages.create"), 0);
 });
 
-test("'-' is an answer here, not a skip", async () => {
+test("'-' is not accepted as an answer to any of the three text questions", async () => {
   const h = harness({ records: { "WP-002": wpPage() } });
   await h.send("/new_evidence WP-002");
-  await answerAll(h, ["1", "-", "1", "-", "-"]);
-  assert.match(plain(h.created().Summary), /^-\n\nDetails:\n-\n\nNext action:\n-$/);
+  await h.send("1");
+  assert.match((await h.send("-")).reply, /^Answer required\. This field cannot be empty\.\n\n2\/5 /);
+  await h.send("Summary");
+  await h.send("1");
+  assert.match((await h.send("-")).reply, /^Answer required\. This field cannot be empty\.\n\n4\/5 /);
+  await h.send("Details");
+  assert.match((await h.send("-")).reply, /^Answer required\. This field cannot be empty\.\n\n5\/5 /);
+  assert.strictEqual(h.capture.getActiveSession(USER).step, 4);
+  assert.strictEqual(h.count("pages.create"), 0);
+  assert.match((await h.send("--")).reply, /^Created EVD-001\n/, "only a bare '-' is refused");
+});
+
+test("the record's Name is cut to 200 characters; Summary keeps the full text", async () => {
+  const h = harness({ records: { "WP-002": wpPage() } });
+  const summary = "😀".repeat(150) + " " + "x".repeat(300);
+  await h.send("/new_evidence WP-002");
+  await answerAll(h, ["1", summary, "1", "Details", "Next"]);
+  const props = h.created();
+  const name = props.Name.title.map((t) => t.text.content).join("");
+  assert.strictEqual(Array.from(name).length, 200);
+  assert.strictEqual(name, "😀".repeat(150) + " " + "x".repeat(49));
+  assert.ok(plain(props.Summary).startsWith(summary + "\n\nDetails:"));
 });
 
 // --- Parent checks ----------------------------------------------------------------------------
