@@ -577,15 +577,22 @@ the bot nor the setup script is running**.
 
 ## 6. Known limitations
 
-- **KL-1: a creation outcome can be lost in transit.** The record can be
-  created in Notion while the Telegram confirmation never arrives. If a
-  creation command receives no Telegram reply, do not immediately retry. Check
-  with `/show <expected-ID>` first. The expected ID is the number now in
-  `uret-id-counters.json`, because the number is saved when it is reserved,
-  before the record is created: for example `"WP": 2` means `/show WP-002`. If
-  the record exists, creation succeeded. Retry only if confirmed Not Found. A retry after a successful
-  create makes a duplicate record with the next ID; ID reservation prevents ID
-  collisions, not duplicate records.
+- **KL-1: a creation outcome can be lost in transit (accepted MVP
+  limitation).** A record can be created successfully in Notion while the
+  Telegram confirmation message is lost, so the operator sees no reply.
+  Retrying in that case creates a duplicate record with the next ID: ID
+  reservation prevents ID collisions, not duplicate records. This was observed
+  live once (WP-002, Phase 3-5) and accepted for the MVP; the bot does not
+  detect or prevent it.
+
+  **Operator procedure: verify the outcome before retrying.** If a creation
+  command gets no Telegram reply:
+  1. Do not retry.
+  2. Run `/show <expected-ID>`. The expected ID is the number now in
+     `uret-id-counters.json`, because the number is saved when it is reserved,
+     before the record is created: for example `"WP": 2` means `/show WP-002`.
+  3. If the record exists, creation succeeded; do nothing more.
+  4. Retry only if `/show` confirms `Not found`.
 - **Relation targets are not checked.** The schema check confirms that a
   property is a relation, not which database it points to (for example
   Evidence → `Work package`). If a relation were re-pointed by hand, writes
@@ -660,6 +667,29 @@ deliberate bugs into the new code, one at a time (for example a widened status
 list, an extra property in the update payload, a skipped Notion check), and
 confirming that the tests fail. These checks were run by hand and are not part
 of `npm test`.
+
+### Live validation (Phase 4)
+
+**Result: PASS.** Run on Termux against the live Notion workspace, at commit
+`d10d2ef`, with 398/398 automated tests passing on that checkout. Verified:
+
+| Check | Result |
+|---|---|
+| `/status` shows the `Active work:` section | Pass |
+| OPP-002 is Active | Pass |
+| SPEC-002 is linked to OPP-002 | Pass |
+| WP-002 is active and linked to SPEC-002 | Pass |
+| `/new_evidence WP-002` created EVD-002 | Pass |
+| EVD-002 Type is `Test results` | Pass |
+| EVD-002 Verdict is `Pass` | Pass |
+| EVD-002 is linked to WP-002 | Pass |
+| `/show EVD-002` shows the Evidence record | Pass |
+| WP-002 shows the Evidence relation | Pass |
+| `/status` reports `Evidence: 1` for WP-002 | Pass |
+
+An earlier live `/status` showed only the counts, which is the pre-Phase 4
+output; the code at `d10d2ef` always adds the `Active work:` section after the
+counts. The final run above showed the section as specified.
 
 ## 8. Development
 
